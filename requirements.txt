@@ -1,2 +1,5 @@
 fastapi>=0.110
 uvicorn>=0.29
+# AI Studio second source (optional at run time; only used when ACPANT_STUDIO_CONFIG is set)
+httpx>=0.27,<1
+websockets>=13,<16

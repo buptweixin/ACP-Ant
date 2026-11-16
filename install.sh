@@ -110,12 +110,14 @@ fi
 "$ROOT/venv/bin/python" -m pip install -q --disable-pip-version-check -r "$SRC/requirements.txt" || die "装依赖失败（网络？能不能访问 pypi.org）"
 
 say "复制程序文件"
-install -m 644 "$SRC/acp_ant.py" "$SRC/acp_panel.py" "$SRC/panel.html" "$ROOT/"
+install -m 644 "$SRC/acp_ant.py" "$SRC/acp_panel.py" "$SRC/panel.html" "$SRC/studio_provider.py" "$ROOT/"
 sed -e "s#^ROOT=\${AGY_ROOT:-/opt/acp-ant}#ROOT=\${AGY_ROOT:-$ROOT}#" \
     -e "s#^AGY=\${AGY_BIN:-\$ROOT/bin/agy}#AGY=\${AGY_BIN:-${AGY_BIN:-$ROOT/bin/agy}}#" \
     "$SRC/scripts/account.sh" > "$ROOT/account.sh.tmp" && mv "$ROOT/account.sh.tmp" "$ROOT/account.sh"
 chmod 755 "$ROOT/account.sh"
 install -m 755 "$SRC/scripts/update.sh" "$ROOT/update.sh"
+sed -e "s#^ROOT=\${AGY_ROOT:-/opt/acp-ant}#ROOT=\${AGY_ROOT:-$ROOT}#" "$SRC/scripts/aistudio.sh" > "$ROOT/aistudio.sh.tmp" && mv "$ROOT/aistudio.sh.tmp" "$ROOT/aistudio.sh"
+chmod 755 "$ROOT/aistudio.sh"
 install -m 644 "$SRC/scripts/smoke_test.py" "$SRC/scripts/agent_test.py" "$SRC/scripts/acp_probe.py" "$ROOT/"
 # 安装记录：面板据此判断能不能一键更新（源码目录是 git 仓库、服务能自动重启）
 SRC_GIT=""; git -C "$SRC" rev-parse --git-dir >/dev/null 2>&1 && SRC_GIT=$SRC

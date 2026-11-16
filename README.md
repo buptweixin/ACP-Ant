@@ -253,6 +253,32 @@ ACP 协议本身只能让 Antigravity 调用它自己那边的工具，不能把
 - 模型偶尔会不按格式写；这时网关会把原文当作普通回答返回，Agent 一般会重试或继续。
 - 流式输出时，普通文字照常实时输出，工具调用那一段等写完后一次性发出。
 
+## AI Studio 第二路（可选，1.5.0 起）
+
+除了 Antigravity，网关还可以用 **Google AI Studio** 作为第二路来源，由开源项目
+[AIStudio2API](https://github.com/Mag1cFall/AIStudio2API) 提供。同一个地址、同一个密钥：
+
+- 普通模型名（如 `gemini-3.8-flash-medium`）→ Antigravity（不变）
+- `aistudio/<模型名>`（如 `aistudio/gemini-3.8-flash`、`aistudio/gemini-4-hydrogen`）→ AI Studio，模型名原样使用，不会悄悄换成别的模型
+
+启用（需要 Docker）：
+
+```bash
+/opt/acp-ant/aistudio.sh setup     # 启动 ACP-Ant 专用的 AIStudio2API 容器（只监听 127.0.0.1:2051）并让网关使用它
+```
+
+然后在网页控制面板点「＋ 接入 AI Studio」，填 Google 邮箱，在面板里显示的**服务器浏览器**中登录这个账号
+（第一次会下载约 1.2 GB 的浏览器）。登录的不是这个邮箱会被拒绝。
+
+- **为什么要在服务器浏览器里登录**：Windows 版 Chrome 现在会把 Google 登录绑定到这台电脑（设备绑定会话），
+  从 Chrome 复制出来的 Cookie 在没有那台电脑续期时约 2 小时就失效。服务器上的浏览器登录不绑定任何电脑，实测连续 9 小时以上持续可用。
+- **两路按邮箱对应**：Antigravity 账号的真实邮箱（官方 CLI 记录的）和 AI Studio 账号邮箱相同，就显示在同一张卡片上。
+  这个邮箱有 Antigravity 账号时，AI Studio 自动走同一个代理出口，语言和时区按出口地区设置。
+- **指定账号**：请求头 `X-ACP-Account: <账号名或邮箱>`，两路都认；指定的账号没有对应来源就报错，不会换成别的邮箱。不带这个头时照常轮换。
+- **额度**：Google 不提供 AI Studio 的剩余额度，面板显示「剩余 未知」，另外显示本网关记录的今日调用次数和 Token，以及被 Google 限额的模型和恢复时间；不与 Antigravity 的百分比相加。
+- 停用：`/opt/acp-ant/aistudio.sh remove`（加 `--purge` 同时删除 AI Studio 的数据）。Docker 方式安装的网关需要自己运行 AIStudio2API，并用 `ACPANT_STUDIO_CONFIG` 指向一个包含 `base_url`、`api_key`、`admin_password` 的 JSON 文件。
+- AIStudio2API 是第三方项目，使用前请阅读它的说明和许可证；自动化使用 Google 服务可能违反其条款，风险自负。
+
 ## 模型名
 
 | 模型名 | 实际用的模型 | 思考档位 |
@@ -419,6 +445,10 @@ git clone https://github.com/czg86389-hub/ACP-Ant.git && cd ACP-Ant && ./install
 ```
 
 All settings are listed in [gateway.env.example](gateway.env.example).
+
+### AI Studio as a second source (optional, since 1.5.0)
+
+Besides Antigravity, the gateway can serve **Google AI Studio** through [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API). Same base URL and key: normal model names go to Antigravity, `aistudio/<model>` goes to AI Studio (the model name is used as is, never swapped). Enable it with `/opt/acp-ant/aistudio.sh setup` (needs Docker; starts a dedicated AIStudio2API container on 127.0.0.1:2051), then in the web panel click **＋ 接入 AI Studio**, enter the Google e-mail and sign in inside the **server-side browser** shown in the panel. Server-side sign-ins are not bound to any PC; cookies copied from Windows Chrome are device-bound and expire after about 2 hours without that PC. Accounts of both sources are matched by verified e-mail; `X-ACP-Account: <name or e-mail>` pins a request to one account. Google does not report AI Studio's remaining quota, so the panel shows it as unknown plus today's usage and any limits Google reported. Disable with `aistudio.sh remove`.
 
 ### 🎬 Recommended: COOL AI — AI video & image studio for e-commerce
 

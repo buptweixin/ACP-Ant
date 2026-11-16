@@ -3,6 +3,14 @@
 网页控制面板会定期读取这个文件（只读取，不上传任何数据）：这里出现比你正在运行的版本更新的版本号时，面板顶部会提示，
 用 `git clone` + `./install.sh` 装的可以在面板里一键更新。格式：`## 版本号 — 日期`，下面每行一条 `- 改动`。
 
+## 1.5.0 — 2026-11-16
+- 修：所有账号突然都报「RESOURCE_EXHAUSTED (code 429)」，但额度其实没用完。原因是 Google 现在拒绝 agent 说明里的一句话（"You have no built-in tools: never try to read files, browse, or run commands yourself."），已改写为意思相同的另一句。升级后网关重启即恢复。
+- 新增：AI Studio 第二路（可选）。运行 `aistudio.sh setup` 启动专用的 AIStudio2API，之后同一个地址和密钥下 `aistudio/<模型名>` 走 AI Studio，其余照旧走 Antigravity。
+- 新增：面板「＋ 接入 AI Studio」与卡片上的「重新登录」：在面板里操作服务器上的浏览器登录 Google（全屏、可输入、可粘贴），登录的不是指定邮箱会被拒绝；有同邮箱 Antigravity 账号时自动用同一代理出口。也保留粘贴 Cookie 的方式。
+- 新增：请求头 `X-ACP-Account: <账号名或邮箱>` 可指定这次用哪个 Google 账号（两路都认），指定的账号不可用就报错，不换别的邮箱。
+- 面板：每个账号卡片分开显示 Antigravity 和 AI Studio 两路的状态、模型和额度；AI Studio 剩余额度显示「未知」，另显示今日调用和被限额的模型；只有 AI Studio 的账号单独成卡，可一键添加它的 Antigravity 登录。「接入信息」「在线测试」包含 AI Studio 模型。
+- 依赖新增 `httpx`、`websockets`（只在启用 AI Studio 时使用）；新增离线测试 `scripts/studio_test.py`。
+
 ## 1.4.5 — 2026-11-12
 - 修：每次请求最多 10 张图、多出的最早几张被悄悄丢掉（调用方不知道）。实测 Gemini 3.8 Flash 一次 200 张按顺序全看到、250 张上游报错，默认上限改为 200（`AGY_MAX_IMAGES`）。最新一条消息里的图从不丢弃，超过上限直接返回 400 并写明张数；只有多轮对话里更早轮次的图从最早的开始换成一句说明。
 - 修：没有 Antigravity 使用许可的账号，上游把「⚠ You do not have a valid license of this product…(#3501)」当回答发回，网关以前原样交给调用方。现在认出后把这个号标成「无使用许可（#3501）」不再派活，请求自动换下一个号；面板「检测」也不会再把它显示成「正常」。

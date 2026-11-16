@@ -36,7 +36,7 @@ import time
 import urllib.request
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 core: Any = None          # the acp_ant module (set by setup)
@@ -578,7 +578,8 @@ def account_view(acc) -> dict:
     px = core.read_proxy(acc.home)
     q = acc.quota
     return {
-        "name": acc.name, "enabled": acc.enabled, "usable": acc.usable(), "status": code, "status_text": text,
+        "name": acc.name, "email": token_email(acc.home).lower(),
+        "enabled": acc.enabled, "usable": acc.usable(), "status": code, "status_text": text,
         "cooldown_s": max(0, int(acc.cooldown_until - time.time())), "inflight": acc.inflight,
         "since_start": {"ok": acc.ok, "fail": acc.fail},
         "today": core.STATS.summary(acc.name, 1), "week": core.STATS.summary(acc.name, 7),
@@ -621,11 +622,157 @@ async def api_logout():
     return resp
 
 
+STUDIO_FIELDS = ("account_id", "label", "email", "state", "ready", "models", "error", "disabled", "exit", "quota")
+
+
+def same_exit(email: str) -> tuple[str, str | None]:
+    """(Antigravity account name, its proxy) when exactly one Antigravity login has this verified e-mail."""
+    core.POOL.scan()
+    same = [a for a in core.POOL.accounts.values() if core.account_email(a.home) == email]
+    if len(same) != 1:
+        return "", None
+    return same[0].name, (core.read_proxy(same[0].home) or {}).get("HTTPS_PROXY", "")
+
+
+async def studio_view(accs: list[dict]) -> dict:
+    """AI Studio sessions next to the Antigravity accounts. A session is linked to an account only when both sides
+    verified the same Google e-mail themselves; several matches are shown as "choose one", never guessed. Sessions
+    without an Antigravity account are listed too. Studio reports no used / remaining numbers, so none are shown
+    and nothing is added to the Antigravity statistics."""
+    studio = getattr(core, "STUDIO", None)
+    if studio is None or (not studio.base and not studio.error):
+        return {"configured": False, "error": "", "accounts": [], "unlinked": []}
+    try:
+        rows, error = await studio.accounts()
+    except ImportError:
+        rows, error = [], "缺少 httpx 依赖，AI Studio 通道没有启用"
+    rows = [{k: r.get(k) for k in STUDIO_FIELDS} for r in rows]
+    linked: set[str] = set()
+    for a in accs:
+        a["studio"] = None
+        if not a["email"]:
+            a["studio_link"] = "unknown_email"
+            continue
+        same = [r for r in rows if str(r.get("email") or "").lower() == a["email"]]
+        chosen, why = studio.match(rows, a["email"])
+        if chosen:
+            a["studio"] = next(r for r in rows if r["account_id"] == chosen)
+            a["studio_link"] = "linked"
+            linked.update(r["account_id"] for r in same)
+        else:
+            a["studio_link"] = "ambiguous" if why == "ambiguous" else "none"
+            if why == "ambiguous":
+                a["studio_candidates"] = [r["account_id"] for r in same]
+                linked.update(r["account_id"] for r in same)
+    return {"configured": studio.configured, "error": error or studio.error, "accounts": len(rows),
+            "ready": sum(1 for r in rows if r.get("ready")),
+            "unlinked": [r for r in rows if r["account_id"] not in linked]}
+
+
+VIEW_RE = re.compile(r"^g2a-[A-Za-z0-9_-]{16,64}$")
+
+
+@router.post("/panel/api/studio/login")
+async def api_studio_login(request: Request):
+    """Open a browser on the server for one AI Studio session; the owner signs in through the panel."""
+    require(request, True)
+    email = str((await body_of(request)).get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(400, "缺少账号邮箱")
+    body = {"email": email}
+    core.POOL.scan()
+    same = [a for a in core.POOL.accounts.values() if core.account_email(a.home) == email]
+    if len(same) == 1:   # one Antigravity login with this verified e-mail: AI Studio leaves from the same exit
+        px = core.read_proxy(same[0].home) or {}
+        body.update(use_proxy=True, proxy=px.get("HTTPS_PROXY", ""))
+    status, data = await core.STUDIO.login_call("POST", "/v1/aistudio/accounts/login", body)
+    if status != 200 or not VIEW_RE.match(str(data.get("view") or "")):
+        err = data.get("error") if isinstance(data, dict) else None
+        raise HTTPException(status if status in (400, 409, 503) else 502,
+                            str((err.get("message") if isinstance(err, dict) else None) or "没有打开服务器浏览器（HTTP %s）" % status)[:300])
+    exit_note = ""
+    if body.get("use_proxy"):
+        exit_note = "（与 Antigravity 账号 %s 同一出口 %s %s）" % (same[0].name, data.get("exit_ip") or "", data.get("country") or "")
+    core.event("info", email, "打开服务器浏览器登录 AI Studio" + exit_note)
+    return {"ok": True, "view": data["view"], "email": email, "same_exit_as": same[0].name if body.get("use_proxy") else "",
+            "exit_ip": data.get("exit_ip") or "", "country": data.get("country") or "", "timezone": data.get("timezone") or ""}
+
+
+@router.get("/panel/api/studio/login/{view}")
+async def api_studio_login_state(view: str, request: Request):
+    require(request)
+    if not VIEW_RE.match(view):
+        raise HTTPException(400, "bad view")
+    status, data = await core.STUDIO.login_call("GET", "/v1/aistudio/accounts/login/" + view)
+    if status != 200:
+        raise HTTPException(404 if status == 404 else 502, "读取登录进度失败")
+    if data.get("state") == "done":
+        core.event("info", str(data.get("email") or ""), "AI Studio 已在服务器浏览器重新登录")
+    return {k: data.get(k) for k in ("state", "error", "email", "sidecar_state")}
+
+
+@router.delete("/panel/api/studio/login/{view}")
+async def api_studio_login_cancel(view: str, request: Request):
+    require(request, True)
+    if VIEW_RE.match(view):
+        await core.STUDIO.login_call("DELETE", "/v1/aistudio/accounts/login/" + view)
+    return {"ok": True}
+
+
+@router.websocket("/panel/api/studio/login-view/{view}")
+async def ws_studio_login_view(websocket: WebSocket, view: str):
+    # same session cookie as the panel; same-origin only (the cookie is SameSite=Strict as well)
+    origin = websocket.headers.get("origin", "")
+    host = websocket.headers.get("x-forwarded-host") or websocket.headers.get("host") or ""
+    if (not _valid(websocket.cookies.get(COOKIE, "")) or not VIEW_RE.match(view)
+            or not origin or origin.split("://", 1)[-1] != host):
+        await websocket.close(code=4403)
+        return
+    await websocket.accept()
+    try:
+        await core.STUDIO.relay_login_view(websocket, view)
+    except Exception as e:  # noqa: BLE001
+        core.log.warning("studio login view relay ended: %s", type(e).__name__)
+    finally:
+        try:
+            await websocket.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@router.post("/panel/api/studio/bind")
+async def api_studio_bind(request: Request):
+    """Bind or re-login the AI Studio session of one Google account from a pasted Cookie export. The export goes
+    straight to ACP-Ant's AIStudio2API, which checks with Google whose login it is; it is never logged, stored or sent back."""
+    require(request, True)
+    body = await body_of(request)
+    cookies = body.get("cookies")
+    email = str(body.get("email") or "").strip().lower()
+    if isinstance(cookies, str):
+        cookies = cookies.strip()
+    if not cookies:
+        raise HTTPException(400, "请粘贴这个 Google 账号的完整 Cookie 导出")
+    if len(json.dumps(cookies)) > 300_000:
+        raise HTTPException(400, "内容太长，请只导出一个浏览器会话的 Cookie")
+    status, data = await core.STUDIO.bind(cookies, email, same_exit(email)[1] if email else None)
+    if status != 200:
+        err = data.get("error") if isinstance(data, dict) else None
+        msg = (err.get("message") if isinstance(err, dict) else None) or "AI Studio 接入没有完成（HTTP %s）" % status
+        core.event("warn", email, "AI Studio 接入没有成功")
+        raise HTTPException(status if status in (400, 409, 503) else 502, str(msg)[:300])
+    got = str(data.get("email") or email)
+    core.event("info", got, "AI Studio 会话已接入（粘贴 Cookie）")
+    studio = data.get("studio") if isinstance(data.get("studio"), dict) else {}
+    return {"ok": True, "email": got, "account_id": data.get("account_id"), "existing": bool(data.get("existing")),
+            "ready": bool(studio.get("ready")), "state": studio.get("state")}
+
+
 @router.get("/panel/api/overview")
 async def api_overview(request: Request):
     require(request)
     core.POOL.scan()
     accs = [account_view(a) for a in core.POOL.accounts.values()]
+    studio = await studio_view(accs)
     today = {"ok": 0, "fail": 0, "in": 0, "out": 0}
     for a in accs:
         for k in today:
@@ -633,8 +780,9 @@ async def api_overview(request: Request):
     return {"server": {"started": STARTED, "now": time.time(), "accounts": len(accs), "usable": sum(1 for a in accs if a["usable"]),
                        "inflight": sum(a["inflight"] for a in accs), "waiting": core.POOL.waiting,
                        "per_account": core.POOL.limit, "per_account_default": core.PER_ACCOUNT, "require_proxy": core.REQUIRE_PROXY,
-                       "agy": core.AGY, "initial_password": os.path.exists(init_pw_file()), "version": core.__version__},
-            "update": update_view(),
+                       "agy": core.AGY, "initial_password": os.path.exists(init_pw_file()), "version": core.__version__,
+                       "fusion": getattr(core, "__fusion__", "")},
+            "update": update_view(), "studio": studio,
             "today": today, "accounts": accs, "settings": STATE["settings"]}
 
 
@@ -901,8 +1049,12 @@ async def api_connect(request: Request):
     for m in core.POOL.models_seen:
         if m not in names:
             names.append(m)
-    return {"base": base, "openai": base + "/v1", "anthropic": base, "key": core.API_KEY, "models": names,
-            "default_model": core.DEFAULT_MODEL}
+    try:
+        studio_models = [m["id"] for m in await core.STUDIO.models()]
+    except Exception:  # noqa: BLE001   (the Antigravity list must not depend on the second source)
+        studio_models = []
+    return {"base": base, "openai": base + "/v1", "anthropic": base, "key": core.API_KEY, "models": names + studio_models,
+            "antigravity_models": names, "studio_models": studio_models, "default_model": core.DEFAULT_MODEL}
 
 
 @router.post("/panel/api/test")
@@ -913,8 +1065,28 @@ async def api_test(request: Request):
     if not prompt:
         raise HTTPException(400, "请输入要测试的内容")
     model = str(body.get("model") or core.DEFAULT_MODEL)
-    system, blocks = core.to_acp("", [{"role": "user", "parts": [{"type": "text", "text": prompt}]}], [], "auto")
     t0 = time.time()
+    if core.is_studio_model(model):
+        # same path a client takes: the explicit aistudio/ model goes to the Studio source, nothing is remapped
+        email = str(body.get("email") or "").strip().lower()
+        r = await core.STUDIO.forward("/v1/chat/completions", {"model": model, "stream": False,
+                                                                "messages": [{"role": "user", "content": prompt}]}, None, email)
+        try:
+            data = json.loads(bytes(r.body).decode("utf-8", "replace"))
+        except ValueError:
+            data = {}
+        seconds = round(time.time() - t0, 1)
+        if r.status_code != 200:
+            err = data.get("error") if isinstance(data, dict) else None
+            msg = (err.get("message") if isinstance(err, dict) else err) or "HTTP %s" % r.status_code
+            return {"ok": False, "error": "AI Studio：%s" % str(msg)[:300], "seconds": seconds, "source": "aistudio"}
+        try:
+            text = data["choices"][0]["message"]["content"] or ""
+        except (KeyError, IndexError, TypeError):
+            text = ""
+        return {"ok": True, "text": text, "account": r.headers.get("x-acp-upstream-account") or "", "seconds": seconds,
+                "model": model, "source": "aistudio"}
+    system, blocks = core.to_acp("", [{"role": "user", "parts": [{"type": "text", "text": prompt}]}], [], "auto")
     parts, account = [], ""
     try:
         async for kind, text, acc in core.generate(model, system, blocks):
@@ -923,7 +1095,8 @@ async def api_test(request: Request):
                 parts.append(text)
     except core.AcpError as e:
         return {"ok": False, "error": "%s：%s" % (e.kind, e), "seconds": round(time.time() - t0, 1)}
-    return {"ok": True, "text": "".join(parts), "account": account, "seconds": round(time.time() - t0, 1), "model": model}
+    return {"ok": True, "text": "".join(parts), "account": account, "seconds": round(time.time() - t0, 1), "model": model,
+            "source": "antigravity"}
 
 
 @router.get("/panel/api/proxies")
@@ -1047,6 +1220,8 @@ def install_info() -> dict:
 
 def can_apply(info: dict) -> tuple[bool, str]:
     """One-click update needs: install.sh install from a git clone, update.sh in place, and systemd to restart us."""
+    if info.get("pin"):      # this install carries local changes; update with the script named in install-info.json
+        return False, "pinned"
     mode = info.get("mode")
     if mode == "docker":
         return False, "docker"
@@ -1069,7 +1244,8 @@ def update_view(with_log: bool = False) -> dict:
     d = {"current": core.__version__, "latest": latest, "available": False,
          "checked_at": UPDATE["checked_at"], "error": UPDATE["error"], "notes": UPDATE["notes"], "repo": UPDATE_REPO,
          "auto": bool(STATE.get("settings", {}).get("update_check", True)) and UPDATE_HOURS > 0, "every_hours": UPDATE_HOURS,
-         "mode": info.get("mode"), "src": info.get("src") or "", "can_apply": ok, "why": why, "state": "idle"}
+         "mode": info.get("mode"), "src": info.get("src") or "", "can_apply": ok, "why": why, "state": "idle",
+         "pin": str(info.get("pin") or ""), "pin_update": str(info.get("pin_update") or "")}
     if with_log:
         d["log"] = UPDATE["log"][-6000:]
     return d
@@ -1080,7 +1256,7 @@ def _silent_sync_files_sync() -> bool:
     info = install_info()
     src = str(info.get("src") or "")
     # ponytail: unmanaged installs keep local fixes; use a managed git install for automatic file sync.
-    if not src:
+    if not src or info.get("pin"):
         return False
     for fname in ("panel.html", "README.md"):
         try:
@@ -1261,6 +1437,8 @@ def setup(app, module) -> None:
     async def _panel_startup() -> None:
         asyncio.create_task(patrol())
         asyncio.create_task(update_loop())
+        if getattr(core, "STUDIO", None) is not None:
+            core.STUDIO.start_background()
 
     @app.on_event("shutdown")
     async def _panel_shutdown() -> None:

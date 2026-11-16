@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
 import json
 import logging
 import os
@@ -60,7 +61,9 @@ from typing import Any, AsyncIterator
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-__version__ = "1.4.5"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
+from studio_provider import STUDIO, is_studio_model
+
+__version__ = "1.5.0"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
 
 log = logging.getLogger("acp-ant")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -172,7 +175,7 @@ tools: []
 excludeDefaultComponents: true
 mainAgent: true
 ---
-You have no built-in tools: never try to read files, browse, or run commands yourself.
+This agent has no local tools; answer from the conversation itself.
 If the appended instructions describe external tools and a <tool_calls> text protocol, request tools only with exactly
 that protocol and wait for their results. Otherwise answer directly in text.
 Follow the appended system instructions exactly.
@@ -788,6 +791,49 @@ class Pool:
 
 POOL = Pool()
 
+# One request may name the Google account it wants (header X-ACP-Account: account name or e-mail). The choice is
+# verified against this gateway's own accounts and then holds for that request only; without the header nothing changes.
+PIN: contextvars.ContextVar = contextvars.ContextVar("acp_account_pin", default=None)
+_TOKEN_FILE = os.path.join(".gemini", "antigravity-cli", "antigravity-oauth-token")
+
+
+def account_email(home: str) -> str:
+    """The Google e-mail the official CLI itself recorded for this login ("" when unknown). Never taken from the name."""
+    try:
+        with open(os.path.join(home, _TOKEN_FILE)) as f:
+            return str(json.load(f).get("id_token_email") or "").strip().lower()
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def select_account(request: Request) -> None:
+    wanted = (request.headers.get("x-acp-account") or "").strip()
+    if not wanted:
+        PIN.set(None)
+        return
+    if len(wanted) > 128 or not re.fullmatch(r"[A-Za-z0-9_.@+-]+", wanted):
+        raise HTTPException(400, "X-ACP-Account is not a valid account name or e-mail")
+    POOL.scan()
+    if wanted in POOL.accounts:
+        PIN.set((wanted, account_email(POOL.accounts[wanted].home)))
+        return
+    if "@" not in wanted:
+        raise HTTPException(400, "X-ACP-Account: no such account")
+    email = wanted.lower()
+    names = [a.name for a in POOL.accounts.values() if account_email(a.home) == email]
+    if len(names) > 1:
+        raise HTTPException(409, "X-ACP-Account: several accounts use this e-mail; name one of them")
+    PIN.set((names[0] if names else "", email))     # no Antigravity login for it: only its AI Studio session can serve
+
+
+def pinned_email(model: Any) -> str:
+    pin = PIN.get()
+    if not is_studio_model(model):
+        return ""
+    if pin and not pin[1]:
+        raise HTTPException(400, "X-ACP-Account: this account has no verified Google e-mail yet, so it cannot be linked to AI Studio")
+    return pin[1] if pin else ""
+
 
 async def run_on(acc: Account, model: str, effort: str | None, system: str, blocks: list[dict], deadline: float) -> AsyncIterator[tuple[str, str]]:
     """One attempt on one account: new session -> model / thought level -> prompt -> stream (kind, text) -> close.
@@ -959,6 +1005,12 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
         effort = effort_override
     deadline = time.time() + REQUEST_TIMEOUT
     tried: set[str] = set()
+    pin = PIN.get()
+    if pin:    # the caller chose one account: run there or fail, never on someone else's
+        if not pin[0]:
+            raise AcpError("the requested account has no Antigravity login on this gateway", "BAD_REQUEST")
+        POOL.scan()
+        tried = {n for n in POOL.accounts if n != pin[0]}
     last: AcpError | None = None
     upstream_fails = 0
     while time.time() < deadline:
@@ -1798,6 +1850,7 @@ def check_key(request: Request) -> None:
     token = auth[7:] if auth[:7].lower() == "bearer " else (request.headers.get("x-api-key") or request.headers.get("api-key") or "")
     if not API_KEY or not secrets.compare_digest(token.encode(), API_KEY.encode()):
         raise HTTPException(401, "unauthorized")
+    select_account(request)
 
 
 SSE_PING = ": keep-alive\n\n"                                       # an SSE comment: every client skips it
@@ -1860,6 +1913,9 @@ async def _read_body(request: Request) -> dict:
 async def chat_completions(request: Request):
     check_key(request)
     body = await _read_body(request)
+    studio = await STUDIO.forward('/v1/chat/completions', body, request.headers, pinned_email(body.get("model")))
+    if studio is not None:
+        return studio
     model_name = str(body.get("model") or DEFAULT_MODEL)
     system, msgs, tools, choice = from_openai(body)
     prepare_media(msgs, model_name)
@@ -1949,6 +2005,9 @@ ANTHROPIC_ERR = {"QUOTA": (429, "rate_limit_error"), "RATE_LIMIT": (429, "rate_l
 async def messages(request: Request):
     check_key(request)
     body = await _read_body(request)
+    studio = await STUDIO.forward('/v1/messages', body, request.headers, pinned_email(body.get("model")))
+    if studio is not None:
+        return studio
     model_name = str(body.get("model") or DEFAULT_MODEL)
     system, msgs, tools, choice = from_anthropic(body)
     prepare_media(msgs, model_name)
@@ -2041,6 +2100,9 @@ async def messages(request: Request):
 async def count_tokens(request: Request):
     check_key(request)
     body = await _read_body(request)
+    studio = await STUDIO.forward('/v1/messages/count_tokens', body, request.headers, pinned_email(body.get("model")))
+    if studio is not None:
+        return studio
     system, msgs, tools, choice = from_anthropic(body)
     msgs = [m for m in msgs if m["parts"]] or [{"role": "user", "parts": [{"type": "text", "text": " "}]}]
     for m in msgs:   # do not download anything just to count
@@ -2059,6 +2121,9 @@ async def responses(request: Request):
     """OpenAI Responses API (Codex CLI and other newer OpenAI clients): text, images, function tools, custom tools."""
     check_key(request)
     body = await _read_body(request)
+    studio = await STUDIO.forward('/v1/responses', body, request.headers, pinned_email(body.get("model")))
+    if studio is not None:
+        return studio
     model_name = str(body.get("model") or DEFAULT_MODEL)
     system, msgs, tools, choice, custom = from_responses(body)
     prepare_media(msgs, model_name)
@@ -2196,7 +2261,8 @@ async def models(request: Request):
                 names.append(n)
     data = [{"id": n, "object": "model", "type": "model", "display_name": n, "created": 0, "created_at": "2026-01-01T00:00:00Z",
              "owned_by": "antigravity"} for n in names]
-    return {"object": "list", "data": data, "has_more": False, "first_id": names[0] if names else None, "last_id": names[-1] if names else None}
+    data.extend(await STUDIO.models())
+    return {"object": "list", "data": data, "has_more": False, "first_id": data[0]["id"] if data else None, "last_id": data[-1]["id"] if data else None}
 
 
 @app.get("/healthz")

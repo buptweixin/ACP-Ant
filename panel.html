@@ -10,6 +10,9 @@
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--text);font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
 a{color:var(--acc)}
+.mask.lv{padding:8px}.mask.lv .modal{width:min(1680px,99vw);max-width:none;padding:10px 14px}
+#lvStage{height:calc(100vh - 190px)}#lvStage.actual{overflow:auto;display:block!important}
+.src{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
 button{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--text);border-radius:8px;padding:6px 12px}
 button:hover{border-color:var(--acc)}
 button.primary{background:var(--acc);border-color:var(--acc);color:#fff}
@@ -100,6 +103,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
     <button class="primary" data-top="add">＋ 添加账号</button>
     <button data-top="quotaAll">刷新全部额度</button>
     <button data-top="proxies">代理记录</button>
+    <button onclick="addStudioModal()">＋ 接入 AI Studio</button>
     <button data-top="connect">接入信息</button>
     <button data-top="test">在线测试</button>
     <button data-top="settings">设置</button>
@@ -170,14 +174,16 @@ function render() {
   $("#srvPill").innerHTML = '<span class="dot ok"></span><span>运行中 · v' + esc(s.version) + " · 已运行 " + esc(ago(s.started).replace("前", "")) + "</span>";
   $("#banner").innerHTML = (s.initial_password ? '<div class="banner">你还在用初始密码。建议点右上角「设置」改成自己的密码（改完服务器上的初始密码文件会自动删除）。</div>' : "");
   $("#summary").innerHTML = [
-    ["账号", s.usable + " / " + s.accounts, "可用 / 总数"],
+    ["Antigravity 账号", s.usable + " / " + s.accounts, "可用 / 总数"],
+    ["AI Studio 会话", DATA.studio && DATA.studio.configured ? (DATA.studio.ready || 0) + " / " + (DATA.studio.accounts || 0) : "未接入", DATA.studio && DATA.studio.error ? '<span class="err">' + esc(DATA.studio.error) + "</span>" : "就绪 / 总数 · 额度数字未提供"],
     ["今日请求", t.ok + " / " + t.fail, "成功 / 失败"],
     ["今日 Token", num(t.in) + " / " + num(t.out), "输入 / 输出（含思考）"],
     ["正在处理 / 同时上限", s.inflight + " / " + s.usable * s.per_account,
      "每个账号同时 " + s.per_account + " 个 · " + (s.waiting ? '<span class="err">排队 ' + s.waiting + " 个</span>" : "无排队")],
   ].map(([a, b, c]) => '<div class="card"><div class="mute small">' + a + '</div><div class="big">' + esc(b) + '</div><div class="mute small">' + c + "</div></div>").join("");
-  $("#accounts").innerHTML = DATA.accounts.length ? DATA.accounts.map(cardHtml).join("") :
-    '<div class="card">还没有账号。点右上角「＋ 添加账号」，按提示填代理并登录 Google。</div>';
+  $("#accounts").innerHTML = (DATA.accounts.length ? DATA.accounts.map(cardHtml).join("") :
+    '<div class="card">还没有账号。点右上角「＋ 添加账号」，按提示填代理并登录 Google。</div>') +
+    ((DATA.studio && DATA.studio.unlinked) || []).map(studioOnlyHtml).join("");
 }
 
 function quotaHtml(a) {
@@ -192,12 +198,153 @@ function quotaHtml(a) {
   }).join("") + "</div>").join("");
 }
 
+function when(v) { if (!v) return "暂无"; const ts = typeof v === "number" ? v : Date.parse(v) / 1000; return Number.isFinite(ts) ? ago(ts) : "暂无"; }
+function studioState(s) {
+  if (s.disabled) return ["off", "已停用"];
+  if (s.state === "login_required") return ["error", "需重新登录（已排队自动重建）"];
+  if (s.error) return ["warn", s.error];
+  if (!s.ready) return ["warn", s.stale ? "状态待刷新" : "未就绪"];
+  return s.last_generation_ok_at ? ["ok", "可用 · 最近真实调用成功"] : ["ok", "管理状态可用 · 尚无真实调用记录"];
+}
+function studioQuota(q) {
+  const u = q.used_today || {}, t = v => { const d = new Date(v); return isNaN(d) ? "" : (d.getMonth() + 1) + "-" + d.getDate() + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0"); };
+  const lim = (q.limits || []).map(l => '<div class="small"><span class="err">' + esc(l.model === "*" ? "全部模型" : l.model) + "：" + esc(l.kind) + (l.limit ? "（上限 " + l.limit + "）" : "") + "</span>，" + esc(t(l.until)) + " 恢复</div>").join("");
+  return '<div class="row small"><span class="mute">额度</span> 剩余 <b>未知</b>' + (q.plan && q.plan !== "未知" ? ' <span class="mute">· 档位 ' + esc(q.plan) + "</span>" : "") +
+    '<div class="small">今日已用（本网关记录）：请求 <b>' + (u.requests || 0) + "</b> 次（成功 " + (u.succeeded || 0) + "，被限额拒绝 " + (u.rate_limited || 0) + "）· Token " + num(u.total_tokens || 0) +
+    ' <span class="mute">· 太平洋时间 0 点重置（' + esc(t(q.resets_at)) + "）</span></div>" +
+    (lim || '<div class="small mute">没有模型处于限额冷却。</div>') +
+    '<div class="mute small">Google 不提供 AI Studio 的剩余额度；限额只在 Google 拒绝请求时才知道。不与 Antigravity 的百分比相加。</div></div>';
+}
+function studioBody(s) {
+  const [cls, text] = studioState(s), q = s.quota || {}, models = s.models || [];
+  return '<div class="row small"><span class="pill s-' + cls + '"><span class="dot"></span>' + esc(text) + "</span> " +
+    '<span class="mute">' + (s.exit ? "出口 " + esc(s.exit) : "出口：服务器本机网络") + "</span></div>" +
+    '<div class="row small"><span class="mute">会话同步</span> ' + esc(when(s.last_cookie_sync_at)) + ' <span class="mute">｜登录校验</span> ' + esc(when(s.last_identity_check_at)) +
+    ' <span class="mute">｜真实调用成功</span> ' + esc(when(s.last_generation_ok_at)) +
+    (s.last_generation_error_at ? ' <span class="mute">｜调用失败</span> <span class="err">' + esc(when(s.last_generation_error_at)) + "</span>" : "") +
+    (s.sync_pending ? ' · <span class="mute">等待自动同步</span>' : "") + (s.auto_repairs ? ' · <span class="mute">已自动重建 ' + s.auto_repairs + " 次</span>" : "") + "</div>" +
+    (q.service_state && q.service_state !== "RUNNING" ? '<div class="row small err">AI Studio 生成服务未运行（' + esc(q.service_state) + '），网关会在有可用账号后自动启动</div>' : "") +
+    studioQuota(q) +
+    '<details class="small"><summary>模型（' + models.length + "）</summary><div class=\"chips\">" + models.map(m => '<span class="chip" onclick="copy(\'aistudio/' + esc(m) + '\')">aistudio/' + esc(m) + "</span>").join("") + "</div></details>";
+}
+let LV = null;
+function liveLoginModal(email) {
+  openModal('<h3>' + esc(email) + ' · 在服务器浏览器里登录 AI Studio</h3>' +
+    '<p class="small mute" style="margin:4px 0">先用鼠标点一下画面里的输入框，再直接打字；粘贴用 Ctrl+V。请登录 <b>' + esc(email) + '</b>，按提示完成验证和 Google Drive 授权，完成后自动关闭。登录的不是这个邮箱会被拒绝，原会话不变。 <button class="small" id="lvZoom">按原始大小显示</button></p>' +
+    '<div id="lvStage" style="position:relative;min-height:240px;background:#000;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center">' +
+    '<canvas id="lvCanvas" style="cursor:default;outline:none;touch-action:none"></canvas><span id="lvWait" class="mute small" style="position:absolute">正在启动服务器浏览器（第一次要下载浏览器，可能需要一两分钟）…</span></div>' +
+    '<textarea id="lvSink" style="position:absolute;left:-9999px;width:1px;height:1px" autocomplete="off"></textarea>' +
+    '<p id="lvRes" class="small"></p><div class="foot"><button id="lvCancel">取消登录</button></div>');
+  $("#modal").dataset.sticky = "1";
+  $("#mask").classList.add("lv");
+  const st = {email, view: "", ws: null, meta: null, pending: null, done: false, poll: 0, actual: false};
+  const fit = () => { const m = st.meta, stage = $("#lvStage"); if (!m || !stage) return;
+    const k = st.actual ? 1 : Math.min(1, stage.clientWidth / m.width, stage.clientHeight / m.height);
+    canvas.style.width = Math.round(m.width * k) + "px"; canvas.style.height = Math.round(m.height * k) + "px"; };
+  window.addEventListener("resize", fit);
+  LV = st;
+  const canvas = $("#lvCanvas"), sink = $("#lvSink");
+  const res = t => { $("#lvRes").innerHTML = t; };
+  const finish = (msg, kind) => {
+    if (st.done) return; st.done = true; clearInterval(st.poll); try { st.ws && st.ws.close(); } catch (e) {}
+    LV = null; window.removeEventListener("resize", fit); closeModal(); toast(msg, kind); refresh();
+  };
+  const send = m => { if (st.ws && st.ws.readyState === 1 && st.meta) st.ws.send(JSON.stringify({...m, context: st.meta.context})); };
+  const point = e => { const r = canvas.getBoundingClientRect(), m = st.meta;
+    return {x: Math.min(Math.max((e.clientX - r.left) / r.width * m.width, 0), m.width - 1), y: Math.min(Math.max((e.clientY - r.top) / r.height * m.height, 0), m.height - 1)}; };
+  canvas.onpointerdown = e => { if (!st.meta) return; e.preventDefault(); sink.focus({preventScroll: true}); canvas.setPointerCapture(e.pointerId); send({type: "pointer", action: "move", ...point(e)}); send({type: "pointer", action: "down", ...point(e), button: e.button}); };
+  canvas.onpointermove = e => { if (st.meta) send({type: "pointer", action: "move", ...point(e)}); };
+  canvas.onpointerup = e => { if (st.meta) send({type: "pointer", action: "up", ...point(e), button: e.button}); sink.focus({preventScroll: true}); };
+  canvas.onmousedown = e => e.preventDefault();
+  canvas.onwheel = e => { if (!st.meta) return; e.preventDefault(); const u = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? st.meta.height : 1; send({type: "wheel", ...point(e), dx: e.deltaX * u, dy: e.deltaY * u}); };
+  const keyDown = e => { if (e.isComposing || ["Process", "Unidentified", "Dead"].includes(e.key)) return; if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") return; e.preventDefault(); send({type: "key", action: "down", key: e.key}); };
+  const keyUp = e => { if (e.isComposing) return; e.preventDefault(); send({type: "key", action: "up", key: e.key}); };
+  sink.onkeydown = keyDown; sink.onkeyup = keyUp; canvas.setAttribute("tabindex", "-1"); canvas.onkeydown = keyDown; canvas.onkeyup = keyUp;
+  $("#lvZoom").onclick = () => { st.actual = !st.actual; $("#lvStage").classList.toggle("actual", st.actual); $("#lvZoom").textContent = st.actual ? "适应窗口" : "按原始大小显示"; fit(); };
+  sink.onpaste = e => { e.preventDefault(); send({type: "key", action: "up", key: "Control"}); const t = e.clipboardData.getData("text/plain"); if (t) send({type: "text", text: t}); };
+  sink.addEventListener("compositionend", e => { if (e.data) send({type: "text", text: e.data}); sink.value = ""; });
+  sink.addEventListener("input", e => { if (!e.isComposing && e.inputType === "insertText" && e.data) send({type: "text", text: e.data}); sink.value = ""; });
+  $("#lvCancel").onclick = async () => { if (st.view) await api("/studio/login/" + st.view, {method: "DELETE"}).catch(() => {}); finish("已取消登录，原会话不变", ""); };
+  const connect = () => {
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/panel/api/studio/login-view/" + st.view);
+    ws.binaryType = "blob"; st.ws = ws;
+    ws.onmessage = async ev => {
+      if (typeof ev.data === "string") { const m = JSON.parse(ev.data);
+        if (m.type === "status") res('<span class="mute">状态：' + esc({starting: "启动中", waiting: "等待登录", saving: "正在保存登录"}[m.status] || m.status) + "</span>");
+        else if (m.type === "dialog") { if (m.dialog) { const ok = confirm(m.dialog.message || "页面对话框"); st.ws.send(JSON.stringify({type: "dialog", accept: ok, text: m.dialog.value || ""})); } }
+        else if (m.type === "frame") st.pending = m;
+        return; }
+      const meta = st.pending, bmp = await createImageBitmap(ev.data);
+      if (canvas.width !== bmp.width) canvas.width = bmp.width; if (canvas.height !== bmp.height) canvas.height = bmp.height;
+      canvas.getContext("2d").drawImage(bmp, 0, 0); bmp.close(); st.meta = meta;
+      fit(); $("#lvWait").style.display = "none";
+    };
+    ws.onclose = () => { if (!st.done) setTimeout(() => { if (!st.done) connect(); }, 1500); };
+  };
+  api("/studio/login", {body: {email}}).then(r => {
+    st.view = r.view; connect();
+    $("#lvWait").textContent = r.same_exit_as ? "正在启动服务器浏览器（出口与 Antigravity 账号 " + r.same_exit_as + " 相同：" + r.exit_ip + " " + r.country + "）…" : "正在启动服务器浏览器（这个邮箱没有 Antigravity 账号，用 AI Studio 原来的出口）…";
+    st.poll = setInterval(async () => {
+      try { const p = await api("/studio/login/" + st.view);
+        if (p.state === "done") finish(email + " 已在服务器浏览器登录 AI Studio", "ok");
+        else if (p.state === "failed" || p.state === "cancelled") { st.done = true; clearInterval(st.poll); try { st.ws.close(); } catch (e) {} LV = null; res('<span class="err">' + esc(p.error || "登录没有完成") + "</span>"); $("#lvCancel").textContent = "关闭"; $("#lvCancel").onclick = () => { closeModal(); refresh(); }; }
+      } catch (e) {}
+    }, 3000);
+  }).catch(e => { res('<span class="err">' + esc(e.message) + "</span>"); $("#lvCancel").textContent = "关闭"; $("#lvCancel").onclick = () => { closeModal(); }; });
+}
+function addStudioModal() {
+  openModal('<h3>接入 AI Studio 账号</h3><div class="field"><label>Google 邮箱（登录时会核对，必须是这个邮箱）</label><input id="asEmail" placeholder="name@gmail.com" autocomplete="off"></div>' +
+    '<p class="small mute">接着会在服务器上打开一个浏览器，你在面板里登录这个 Google 账号。这个邮箱已有 Antigravity 账号时，AI Studio 自动走同一个代理出口。</p>' +
+    '<p id="asRes" class="small"></p><div class="foot"><button onclick="closeModal()">取消</button><button class="primary" id="asGo">在服务器浏览器里登录</button></div>');
+  $("#asGo").onclick = () => { const e = $("#asEmail").value.trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e)) { $("#asRes").innerHTML = '<span class="err">请填写正确的邮箱</span>'; return; }
+    liveLoginModal(e); };
+}
+function studioModal(email) {
+  openModal("<h3>" + (email ? esc(email) + " 接入 / 重新登录 AI Studio" : "接入 AI Studio 会话") + "</h3>" +
+    (email ? '<div class="banner" style="margin-bottom:10px"><b>推荐：</b>在服务器浏览器里登录一次，会话不绑定你的电脑，电脑关了也能用。<br><button class="primary" style="margin-top:6px" onclick="liveLoginModal(\'' + esc(email) + '\')">在服务器浏览器里登录</button></div><p class="small mute">或者粘贴 Cookie（Windows 版 Chrome 导出的会话绑定在那台电脑上，没有浏览器助手持续推送时约 2 小时失效）：</p>' : "") +
+    '<ol class="small"><li>在已经登录' + (email ? " <b>" + esc(email) + "</b> " : "这个 Google 账号") + '、并且能正常打开 gemini.google.com 的浏览器里，用 Cookie 导出扩展（例如 Cookie-Editor）把 <b>google.com</b> 的全部 Cookie 导出为 JSON。</li>' +
+    "<li>整段粘贴到下面，点「验证并接入」。网关会向 Google 确认这份 Cookie 登录的是哪个邮箱" + (email ? "，不是 " + esc(email) + " 就拒绝" : "") + "，然后建立或更新它的 AI Studio 会话。</li></ol>" +
+    '<div class="field"><textarea id="stCk" spellcheck="false" autocomplete="off" style="min-height:140px" placeholder="粘贴 Cookie JSON（或 name=value; name=value 一行）"></textarea></div>' +
+    '<p class="small mute">Cookie 只用于这一次接入，不显示、不写日志。' + (email ? "" : "新账号接入后，可在它的卡片上点「重新登录」改用服务器浏览器登录，长期有效。") + '</p>' +
+    '<p id="stCkRes" class="small"></p><div class="foot"><button onclick="closeModal()">取消</button><button class="primary" id="stCkGo">验证并接入</button></div>');
+  $("#stCkGo").onclick = async e => {
+    const raw = $("#stCk").value.trim();
+    if (!raw) { $("#stCkRes").innerHTML = '<span class="err">请先粘贴 Cookie</span>'; return; }
+    let cookies = raw;
+    if (raw[0] === "[" || raw[0] === "{") { try { cookies = JSON.parse(raw); } catch (err) { $("#stCkRes").innerHTML = '<span class="err">JSON 不完整，请重新复制整段导出内容</span>'; return; } }
+    $("#stCkRes").innerHTML = '<span class="mute">正在向 Google 验证并建立会话，通常 20–40 秒…</span>';
+    try {
+      const r = await busy(e.target, () => api("/studio/bind", {body: {email, cookies}}));
+      $("#stCk").value = "";
+      toast(r.email + (r.ready ? " 的 AI Studio 会话已就绪" : " 已接入，状态：" + (r.state || "待刷新")), r.ready ? "ok" : "");
+      closeModal(); refresh();
+    } catch (err) { $("#stCkRes").innerHTML = '<span class="err">' + esc(err.message) + "</span>"; }
+  };
+}
+function studioBtn(email, label) { return ' <button class="small" onclick="studioModal(\'' + esc(email || "") + '\')">' + label + "</button>"; }
+function studioHtml(a) {
+  const head = '<div class="row small src"><b>AI Studio</b> <span class="mute">第二路 · AIStudio2API</span>' + (DATA.studio && DATA.studio.configured && a.email ? studioBtn(a.email, a.studio ? "重新登录" : "接入") : "") + "</div>";
+  if (!DATA.studio || !DATA.studio.configured) return head + '<div class="row mute small">这台网关还没有接入 AI Studio 通道' + (DATA.studio && DATA.studio.error ? "：" + esc(DATA.studio.error) : "") + "。</div>";
+  if (DATA.studio.error) return head + '<div class="row err small">' + esc(DATA.studio.error) + "</div>";
+  if (a.studio) return head + studioBody(a.studio);
+  if (a.studio_link === "ambiguous") return head + '<div class="row err small">有多个 AI Studio 会话使用这个邮箱（' + esc((a.studio_candidates || []).join("、")) + "），需要在服务器配置里指定一个，不会自动猜。</div>";
+  if (a.studio_link === "unknown_email") return head + '<div class="row mute small">这个账号的真实 Google 邮箱还没有读到，无法关联 AI Studio。</div>';
+  return head + '<div class="row mute small">未关联：没有邮箱为 ' + esc(a.email) + " 的 AI Studio 会话。</div>";
+}
+function studioOnlyHtml(s) {
+  return '<div class="card acc"><div class="top"><h3>' + esc(s.email || s.label || s.account_id) + '</h3><span class="pill"><span class="dot"></span>仅 AI Studio</span></div>' +
+    '<div class="row small src"><b>Antigravity</b> <span class="mute">原有一路</span></div><div class="row mute small">未关联：这个邮箱没有 Antigravity 登录，只能调用 aistudio/ 模型。 <button class="small" onclick="addModal(\'' + esc(s.email || "") + '\')">添加 Antigravity 登录</button></div>' +
+    '<div class="row small src"><b>AI Studio</b> <span class="mute">第二路 · AIStudio2API</span>' + studioBtn(s.email, "重新登录") + "</div>" + studioBody(s) + "</div>";
+}
+
 function cardHtml(a) {
   const n = esc(a.name);
   const cool = a.cooldown_s ? "（还剩 " + Math.ceil(a.cooldown_s / 60) + " 分钟）" : "";
   return '<div class="card acc s-' + a.status + (a.enabled ? "" : " off") + '">' +
-    '<div class="top"><h3>' + n + '</h3><span class="pill s-' + a.status + '"><span class="dot"></span>' + esc(a.status_text + cool) + "</span>" +
+    '<div class="top"><h3>' + n + (a.email && a.email !== a.name.toLowerCase() ? ' <span class="mute small">' + esc(a.email) + "</span>" : "") + '</h3><span class="pill s-' + a.status + '"><span class="dot"></span>' + esc(a.status_text + cool) + "</span>" +
     '<span class="sp"></span><label class="switch" title="' + (a.enabled ? "已开启：会被调用" : "已关闭：不会被调用") + '"><input type="checkbox" data-act="toggle" data-name="' + n + '"' + (a.enabled ? " checked" : "") + "><span></span></label></div>" +
+    '<div class="row small src"><b>Antigravity</b> <span class="mute">原有一路</span></div>' +
     '<div class="row small"><span class="mute">代理</span> ' + (a.proxy ? esc(a.proxy) : '<span class="mute">无</span>') +
     (a.egress_ip ? ' · <span class="mute">出口</span> ' + esc(a.egress_ip) + (a.country ? " " + esc(a.country) : "") : "") + "</div>" +
     (a.verify_url ? '<div class="verify small">Google 要求验证这个账号：<a href="' + esc(a.verify_url) + '" target="_blank" rel="noopener">打开验证页面</a>（浏览器要登录的是这个账号用的 Google 账号），验证完点「检测」。</div>' : "") +
@@ -207,6 +354,7 @@ function cardHtml(a) {
     '<div class="row small"><span class="mute">正在处理</span> ' + a.inflight + " / " + DATA.server.per_account + ' <span class="mute">｜上次检测</span> ' + esc(ago(a.last_check_at)) +
     (a.last_check_msg ? "：" + (a.last_check_ok ? "" : '<span class="err">') + esc(a.last_check_msg) + (a.last_check_ok ? "" : "</span>") : "") + "</div>" +
     (a.last_error ? '<div class="row small"><span class="mute">最近错误（' + esc(ago(a.last_error_at)) + '）</span> <span class="err">' + esc(kindText(a.last_error)).slice(0, 220) + "</span></div>" : "") +
+    studioHtml(a) +
     '<div class="acts">' +
     '<button data-act="check" data-name="' + n + '">检测</button>' +
     '<button data-act="quota" data-name="' + n + '">刷新额度</button>' +
@@ -223,7 +371,7 @@ function renderEvents(list) {
 
 // ---------- modal
 function openModal(html) { $("#modal").innerHTML = html; $("#mask").style.display = "flex"; }
-function closeModal() { $("#mask").style.display = "none"; $("#modal").innerHTML = ""; delete $("#modal").dataset.sticky; }
+function closeModal() { $("#mask").classList.remove("lv"); $("#mask").style.display = "none"; $("#modal").innerHTML = ""; delete $("#modal").dataset.sticky; }
 $("#mask").addEventListener("mousedown", e => { if (e.target.id === "mask" && !$("#modal").dataset.sticky) closeModal(); });
 async function busy(btn, fn) { const t = btn.innerHTML; btn.disabled = true; btn.innerHTML = '<span class="spin"></span> ' + t; try { return await fn(); } finally { btn.disabled = false; btn.innerHTML = t; } }
 function copy(text) { navigator.clipboard.writeText(text).then(() => toast("已复制", "ok"), () => toast("复制失败，请手动选中复制", "bad")); }
@@ -283,12 +431,12 @@ function deleteModal(name) {
 function nextName() { const used = new Set((DATA?.accounts || []).map(a => a.name)); for (let i = 1; i < 200; i++) if (!used.has("g" + i)) return "g" + i; return "g" + Date.now(); }
 function steps(i) { return '<div class="steps">' + ["1 账号信息", "2 登录 Google", "3 完成"].map((s, k) => '<span class="' + (k === i ? "on" : "") + '">' + s + "</span>").join("") + "</div>"; }
 
-function addModal() {
+function addModal(prefill) {
   $("#modal").dataset.sticky = "1";
   let mode = "oauth";
   openModal('<h3>添加新账号</h3>' +
     '<div class="tabs"><button data-m="oauth" class="on">OAuth 授权</button><button data-m="token">Refresh Token</button></div>' +
-    '<div class="field"><label>账号名字（可以直接用 Google 邮箱，也可以随便起，例如 g4）</label><input id="anName" value="' + nextName() + '"></div>' +
+    '<div class="field"><label>账号名字（可以直接用 Google 邮箱，也可以随便起，例如 g4）</label><input id="anName" value="' + esc(typeof prefill === "string" && prefill ? prefill : nextName()) + '"></div>' +
     '<div id="anTok" style="display:none"><div class="field"><label>Refresh Token</label><textarea id="rtVal" spellcheck="false" autocomplete="off" placeholder="在此处粘贴您的 Refresh Token\n\n支持格式：\n1. 单个 Token（1//...）\n2. JSON（含 refresh_token 字段，如导出的 {email, refresh_token}）\n3. 任意包含 Token 的文本（自动提取）"></textarea></div>' +
     '<p class="small mute">只能用 Antigravity 登录得到的 refresh_token；Gemini CLI 等其它程序的不能用。写进这个账号的登录文件（权限 600），不记日志。</p></div>' +
     '<div class="field"><label>代理（可选，例如 socks5://用户名:密码@1.2.3.4:1080；留空 = 用服务器本机网络）</label><input id="anProxy" type="password" autocomplete="off"></div>' +
@@ -429,7 +577,7 @@ async function testModal() {
   $("#tsGo").onclick = async e => {
     $("#tsOut").innerHTML = "";
     try { const r = await busy(e.target, () => api("/test", {body: {model: $("#tsModel").value, prompt: $("#tsPrompt").value}}));
-      $("#tsOut").innerHTML = r.ok ? '<p class="small mute">账号 ' + esc(r.account) + " · " + r.seconds + " 秒</p><pre>" + esc(r.text) + "</pre>" : '<p class="err">' + esc(kindText(r.error)) + "</p>"; refresh(); }
+      $("#tsOut").innerHTML = r.ok ? '<p class="small mute">' + (r.source === "aistudio" ? "AI Studio" : "Antigravity") + " · 账号 " + esc(r.account) + " · " + r.seconds + " 秒</p><pre>" + esc(r.text) + "</pre>" : '<p class="err">' + esc(kindText(r.error)) + "</p>"; refresh(); }
     catch (err) { $("#tsOut").innerHTML = '<p class="err">' + esc(err.message) + "</p>"; }
   };
 }
@@ -443,6 +591,7 @@ function notesHtml(notes) {
 function manualHtml(u) {
   const src = u.src || "你 git clone 下来的 ACP-Ant 目录";
   if (u.why === "docker") return '<p class="small">这是 Docker 版。在服务器上 <code>docker-compose.yml</code> 所在的目录运行：</p><pre class="small">git pull && docker compose up -d --build</pre><p class="small mute">账号、密钥、面板密码都在数据卷里，不受影响。</p>';
+  if (u.why === "pinned") return '<p class="small">这台网关带有本机的双源融合改动（' + esc(u.pin) + '），所以不会自动更新，以免被官方版本覆盖。要升级，请在服务器上运行（会先合并、检查，通过才替换，失败保持现状）：</p><pre class="small">' + esc(u.pin_update || "见安装目录下的 FUSION.md") + "</pre>";
   const flag = u.mode === "user" ? " --user" : "";
   return '<p class="small">这台不能在面板里一键更新（' + esc({nogit: "源码目录不是 git 仓库", nosystemd: "网关不是由 systemd 服务启动的", manual: "不是用 install.sh 安装的"}[u.why] || u.why) +
     '）。在服务器上运行：</p><pre class="small">cd ' + esc(src) + " && git pull && ./install.sh" + flag + '</pre><p class="small mute">重新运行 install.sh 就是升级：保留 gateway.env、账号、面板密码和统计。</p>';
