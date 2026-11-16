@@ -27,8 +27,9 @@ if [ "$MODE" = update ]; then
   [ -n "${AGY_ROOT:-}" ] || die "--update 需要 AGY_ROOT（面板会自动传）"
   ROOT=$AGY_ROOT
   [ -d "$ROOT" ] || die "安装目录 $ROOT 不存在"
-  INSTALL_MODE=$(sed -n 's/.*"mode": *"\([a-z]*\)".*/\1/p' "$ROOT/install-info.json" 2>/dev/null | head -1)
-  INSTALL_MODE=${INSTALL_MODE:-system}
+  INSTALL_MODE=""
+  [ -f "$ROOT/install-info.json" ] && INSTALL_MODE=$(sed -n 's/.*"mode": *"\([a-z]*\)".*/\1/p' "$ROOT/install-info.json" | head -1)
+  INSTALL_MODE=${INSTALL_MODE:-system}   # copies deployed by hand have no install record yet
 elif [ "$MODE" = user ]; then
   ROOT=${AGY_ROOT:-$HOME/acp-ant}
   INSTALL_MODE=user
