@@ -3,11 +3,13 @@
 把 Google 官方 **Antigravity CLI（`agy`）** 通过 **ACP 协议（Agent Client Protocol）** 变成标准的大模型接口：
 **OpenAI Chat Completions、OpenAI Responses、Anthropic Messages** 三种格式都支持，带**工具调用（function calling）**，Agent 和应用可以直接接入。
 支持**多个 Google 账号轮流使用，每个账号走自己的代理节点**。
+从 1.5.0 起还可以接入 **Google AI Studio 作为第二路来源**：同一个地址、同一个密钥，`aistudio/<模型名>` 走 AI Studio，其余走 Antigravity，同一个 Google 账号两边的额度都能用。
 
 - 用的是 Google 官方命令行程序和官方协议，不抓包、不反代网页登录凭据。
 - Codex CLI、OpenAI SDK、LangChain、Dify、Cline、OpenCode……只要支持 OpenAI 或 Anthropic 接口，填上地址、密钥和模型名就能用。
 - 账号多了自动分流；某个账号额度用完、被限速、要求验证时自动换下一个账号。
-- **网页控制面板**：添加账号、登录 Google、换代理、看每个账号的额度、开关账号、自动巡检，全部在网页里点，不用敲命令。
+- **AI Studio 第二路（可选）**：一条命令启动 [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)，在面板里用服务器上的浏览器登录 Google，不依赖你的电脑，会话长期有效；Gemini 4 Hydrogen 等 AI Studio 模型都能用。详见[AI Studio 第二路](#ai-studio-第二路可选150-起)。
+- **网页控制面板**：添加账号、登录 Google、换代理、看每个账号的额度、开关账号、自动巡检，全部在网页里点，不用敲命令；Antigravity 和 AI Studio 两路按邮箱显示在同一张账号卡片上。
 
 [English](#english)
 
@@ -32,7 +34,8 @@ Agent / 应用 ──OpenAI 或 Anthropic 接口──▶ ACP-Ant（127.0.0.1:80
   （工具由 Agent 自己执行）                       │  挑一个空闲账号
                                                  ├─▶ agy acp（账号 g1，HOME=accounts/g1，走代理 A）──▶ Google Antigravity
                                                  ├─▶ agy acp（账号 g2，HOME=accounts/g2，走代理 B）──▶ Google Antigravity
-                                                 └─▶ agy acp（账号 g3，HOME=accounts/g3，走代理 C）──▶ Google Antigravity
+                                                 ├─▶ agy acp（账号 g3，HOME=accounts/g3，走代理 C）──▶ Google Antigravity
+                                                 └─▶ aistudio/<模型>（可选）──▶ AIStudio2API（127.0.0.1:2051）──▶ Google AI Studio
 ```
 
 - **三种接口**：`/v1/chat/completions`（OpenAI）、`/v1/responses`（OpenAI 新接口，Codex 用这个）、`/v1/messages`（Anthropic），都支持流式输出。
@@ -401,7 +404,7 @@ Anthropic 格式下，「没有可用账号」返回 529（overloaded），Claud
 <a id="english"></a>
 ## English
 
-ACP-Ant turns Google's official **Antigravity CLI (`agy`)** into a standard LLM API by talking to it over the **Agent Client Protocol (ACP)**. It exposes **OpenAI Chat Completions, OpenAI Responses and Anthropic Messages**, with **tool calling**, so agents and apps can plug straight in. It runs **several Google accounts side by side, each through its own proxy**.
+ACP-Ant turns Google's official **Antigravity CLI (`agy`)** into a standard LLM API by talking to it over the **Agent Client Protocol (ACP)**. It exposes **OpenAI Chat Completions, OpenAI Responses and Anthropic Messages**, with **tool calling**, so agents and apps can plug straight in. It runs **several Google accounts side by side, each through its own proxy**. Since 1.5.0 it can also serve **Google AI Studio as a second source** (through [AIStudio2API](https://github.com/Mag1cFall/AIStudio2API)): same base URL and key, `aistudio/<model>` goes to AI Studio, so one Google account's quota on both products can be used.
 
 - **Three APIs:** `/v1/chat/completions`, `/v1/responses` (used by Codex CLI) and `/v1/messages`, all with streaming.
 - **Tool calling:** OpenAI `tools`, Anthropic `tools`, and Responses function and custom tools are described to the model. Its requests come back as native `tool_calls` / `tool_use` / `function_call` items. Your agent runs the tools; Antigravity itself has no tools and every permission request is refused.
