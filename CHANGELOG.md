@@ -3,6 +3,13 @@
 网页控制面板会定期读取这个文件（只读取，不上传任何数据）：这里出现比你正在运行的版本更新的版本号时，面板顶部会提示，
 用 `git clone` + `./install.sh` 装的可以在面板里一键更新。格式：`## 版本号 — 日期`，下面每行一条 `- 改动`。
 
+## 1.5.1 — 2026-11-16
+- 修（#3）：模型在工具参数里直接写了换行 / 制表符（多行命令、代码）时，工具调用解析失败，整段 `<tool_calls>` 被当成文字发给客户端。现在能正常解析。
+- 修（#4）：对话历史很长时，官方 CLI 会把超长的输入从末尾截掉（约 18.8 万字符），最新那句提问因此丢失、模型答非所问。现在整段输入超过 `AGY_MAX_PROMPT_CHARS`（默认 150000 字符，0 = 不限制）时，先缩短很长的旧工具输出，再从最早的历史开始省略，并告诉模型省略了几条；最新输入永远完整保留。
+- 新（PR #8，感谢 @wangbingnan136）：按账号路由模型。每个账号记录自己能用的模型，Gemini 4 Hydrogen、Claude Opus 这类只有付费账号才有的模型只派给有它的账号，不再被悄悄换成默认模型回答；`/v1/models` 列出所有开启账号的模型合集，思考档位按模型实际支持的列出；支持 Hydrogen 的 `xhigh` 档位。
+- 修（#7）：面板「最近事件」里长邮箱和内容文字重叠；账号列过长时省略显示，悬停看全名。
+- 新增离线测试 `scripts/prompt_fit_test.py`、`scripts/model_route_test.py`。
+
 ## 1.5.0 — 2026-11-16
 - 修：所有账号突然都报「RESOURCE_EXHAUSTED (code 429)」，但额度其实没用完。原因是 Google 现在拒绝 agent 说明里的一句话（"You have no built-in tools: never try to read files, browse, or run commands yourself."），已改写为意思相同的另一句。升级后网关重启即恢复。
 - 新增：AI Studio 第二路（可选）。运行 `aistudio.sh setup` 启动专用的 AIStudio2API，之后同一个地址和密钥下 `aistudio/<模型名>` 走 AI Studio，其余照旧走 Antigravity。

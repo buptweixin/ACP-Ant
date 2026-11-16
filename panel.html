@@ -56,7 +56,7 @@ main{max-width:1400px;margin:0 auto;padding:18px}
 .switch input:checked+span:before{transform:translateX(20px)}
 h2{font-size:15px;margin:22px 0 10px}
 .events{max-height:360px;overflow:auto}
-.ev{display:grid;grid-template-columns:120px 70px 1fr;gap:8px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px}
+.ev{display:grid;grid-template-columns:110px minmax(0,220px) minmax(0,1fr);gap:10px;padding:5px 0;border-bottom:1px dashed var(--line);font-size:13px}.ev>span{min-width:0;overflow-wrap:anywhere}.ev .a{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ev.warn .t{color:var(--warn)}
 .mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:flex-start;justify-content:center;z-index:20;overflow:auto;padding:40px 12px}
 .modal{background:var(--panel);border:1px solid var(--line);border-radius:14px;width:min(640px,100%);padding:18px 20px}
@@ -365,7 +365,7 @@ function cardHtml(a) {
 }
 
 function renderEvents(list) {
-  $("#events").innerHTML = list.length ? list.map(e => '<div class="ev ' + esc(e.level) + '"><span class="mute">' + clock(e.t) + '</span><span class="a">' + esc(e.account || "系统") +
+  $("#events").innerHTML = list.length ? list.map(e => '<div class="ev ' + esc(e.level) + '"><span class="mute">' + clock(e.t) + '</span><span class="a" title="' + esc(e.account || "系统") + '">' + esc(e.account || "系统") +
     '</span><span class="t">' + esc(kindText(e.text)) + "</span></div>").join("") : '<span class="mute">暂无</span>';
 }
 

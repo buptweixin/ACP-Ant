@@ -63,7 +63,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from studio_provider import STUDIO, is_studio_model
 
-__version__ = "1.5.0"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
+__version__ = "1.5.1"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
 
 log = logging.getLogger("acp-ant")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -98,6 +98,10 @@ REQUIRE_PROXY = _env_bool("AGY_REQUIRE_PROXY", False)   # since 1.4.0 a proxy is
 DEFAULT_MODEL = os.environ.get("AGY_DEFAULT_MODEL", "gemini-3.8-flash-medium")
 MODEL_FALLBACK = _env_bool("AGY_MODEL_FALLBACK", True)         # unknown model name -> DEFAULT_MODEL instead of an error
 MAX_IMAGES = _env_int("AGY_MAX_IMAGES", 200)                   # images per request. Measured 2026-11-12: Gemini 3.8 Flash
+# agy cuts a prompt that is too long at the END (about 188 000 characters), which loses the newest input. Keep the
+# whole prompt under this many characters by leaving out the oldest history (0 = no limit).
+MAX_PROMPT_CHARS = _env_int("AGY_MAX_PROMPT_CHARS", 150_000)
+HISTORY_TOOL_RESULT_CHARS = 20_000      # a single old tool result longer than this is shortened (head + tail)
 #   saw all of 200 numbered images in order; 250 made Antigravity stop with "agent execution terminated". Images of the
 #   latest message are never dropped (more than this is a 400); only older turns' images give way, oldest first.
 FETCH_IMAGES = _env_bool("AGY_FETCH_IMAGES", True)             # download http(s) image URLs sent by clients
@@ -1529,6 +1533,47 @@ def _calls_block(calls: list[dict]) -> str:
     return "<tool_calls>\n" + json.dumps(arr, ensure_ascii=False) + "\n</tool_calls>"
 
 
+def _msg_chars(m: dict) -> int:
+    n = 0
+    for p in m["parts"]:
+        if p["type"] in ("text", "tool_result"):
+            n += len(p.get("text") or "") + 40
+        elif p["type"] == "tool_call":
+            a = p.get("arguments")
+            n += len(a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)) + len(p.get("name") or "") + 40
+    return n + 20
+
+
+def _clip_result(m: dict) -> dict:
+    if m["role"] != "tool" or not any(p["type"] == "tool_result" and len(p.get("text") or "") > HISTORY_TOOL_RESULT_CHARS
+                                      for p in m["parts"]):
+        return m
+    half = HISTORY_TOOL_RESULT_CHARS // 2
+    parts = [dict(p, text=p["text"][:half] + "\n[... %d characters of this earlier tool output left out ...]\n" %
+                  (len(p["text"]) - 2 * half) + p["text"][-half:])
+             if p["type"] == "tool_result" and len(p.get("text") or "") > HISTORY_TOOL_RESULT_CHARS else p
+             for p in m["parts"]]
+    return dict(m, parts=parts)
+
+
+def _fit_history(history: list[dict], current: list[dict], system_chars: int) -> tuple[list[dict], int]:
+    """The latest input always goes in whole. If the prompt would be longer than MAX_PROMPT_CHARS, shorten long old
+    tool outputs first, then leave out the oldest history messages. Returns (history, number of messages left out)."""
+    if MAX_PROMPT_CHARS <= 0 or not history:
+        return history, 0
+    budget = MAX_PROMPT_CHARS - system_chars - sum(_msg_chars(m) for m in current)
+    sizes = [_msg_chars(m) for m in history]
+    if sum(sizes) <= budget:
+        return history, 0
+    history = [_clip_result(m) for m in history]
+    sizes = [_msg_chars(m) for m in history]
+    total, drop = sum(sizes), 0
+    while drop < len(history) and total > budget:
+        total -= sizes[drop]
+        drop += 1
+    return history[drop:], drop
+
+
 def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_system: str = "", parallel: bool = True) -> tuple[str, list[dict]]:
     """Internal conversation -> (system prompt, ACP prompt blocks). Earlier turns become a transcript (images stay
     in place as image blocks); the trailing user / tool messages are this turn's input."""
@@ -1544,6 +1589,7 @@ def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_
     while k > 0 and msgs[k - 1]["role"] != "assistant":
         k -= 1
     history, current = msgs[:k], msgs[k:]
+    history, left_out = _fit_history(history, current, sum(len(x) for x in sys_parts))
     n_img = sum(1 for m in msgs for p in m["parts"] if p["type"] == "image")
     n_now = sum(1 for m in current for p in m["parts"] if p["type"] == "image")
     if n_now > MAX_IMAGES:
@@ -1601,6 +1647,8 @@ def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_
         if calls:
             text("\n" + _calls_block(calls))
 
+    if left_out:
+        text("[%d earlier message(s) were left out by the gateway to stay within Antigravity's input limit]\n\n" % left_out)
     if history:
         text("<conversation_history>")
         for m in history:
@@ -1695,15 +1743,16 @@ TAG_OPEN, TAG_CLOSE = "<tool_calls>", "</tool_calls>"
 
 def _loads_lenient(s: str) -> Any:
     s = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", s.strip())
+    # strict=False: models often put real newlines / tabs inside string values (multi-line commands, code)
     try:
-        return json.loads(s)
+        return json.loads(s, strict=False)
     except ValueError:
         pass
     for a, b in (("[", "]"), ("{", "}")):
         i, j = s.find(a), s.rfind(b)
         if 0 <= i < j:
             try:
-                return json.loads(s[i:j + 1])
+                return json.loads(s[i:j + 1], strict=False)
             except ValueError:
                 continue
     return None
