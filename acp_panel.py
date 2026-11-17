@@ -1438,6 +1438,7 @@ def setup(app, module) -> None:
         asyncio.create_task(patrol())
         asyncio.create_task(update_loop())
         if getattr(core, "STUDIO", None) is not None:
+            core.STUDIO.on_event = lambda email, text: core.event("warn", email, text)
             core.STUDIO.start_background()
 
     @app.on_event("shutdown")

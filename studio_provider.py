@@ -26,6 +26,10 @@ PREFIX = 'aistudio/'
 PATHS = ('/v1/chat/completions', '/v1/responses', '/v1/messages', '/v1/messages/count_tokens')
 LIVE_STATES = ('ready', 'busy', 'cooldown')
 NOT_CONFIGURED = 'AI Studio 未启用：在服务器上运行 aistudio.sh setup（见 README「AI Studio 第二路」）'
+DENIED = re.compile(r'PERMISSION_DENIED|Permission denied|权限拒绝|(?:错误码|error code) 7\b')
+HEAL_GAP = 600       # seconds: one automatic page restart per account at most this often
+HEAL_TRIES = 3       # restarts in a row that did not help -> leave the account alone for HEAL_PAUSE
+HEAL_PAUSE = 3600
 LOCALES = {'US': 'en-US', 'GB': 'en-GB', 'CA': 'en-CA', 'AU': 'en-AU', 'SG': 'en-SG', 'IN': 'en-IN', 'JP': 'ja-JP',
            'DE': 'de-DE', 'FR': 'fr-FR', 'NL': 'nl-NL', 'TW': 'zh-TW', 'HK': 'zh-HK', 'KR': 'ko-KR'}
 
@@ -140,6 +144,9 @@ class StudioProvider:
         self.logins = {}
         self._service_start_at = 0.0
         self._bg = None
+        self.heals = {}               # e-mail -> {'at': time of the last automatic page restart, 'count': restarts in a row}
+        self._heal_lock = asyncio.Lock()
+        self.on_event = None          # set by the panel: on_event(email, text) adds a line to the activity log
 
     @property
     def configured(self):
@@ -180,7 +187,7 @@ class StudioProvider:
         return JSONResponse({'error': error}, status_code=status, headers={'X-ACP-Provider': 'aistudio'})
 
     # ------------------------------------------------------------------ generation
-    async def forward(self, path, body, incoming=None, email=''):
+    async def forward(self, path, body, incoming=None, email='', _retry=True):
         if not is_studio_model(body.get('model')):
             return None
         native = body['model'][len(PREFIX):]
@@ -226,12 +233,15 @@ class StudioProvider:
                 raw = await upstream.aread()
                 if status >= 400:
                     raw = raw.replace(self.key.encode(), b'[REDACTED]')
-                return Response(raw, status_code=status, media_type=content_type, headers=headers)
-            headers.update({'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
-            response = StudioStreamingResponse(upstream, client, status_code=status, media_type=content_type,
-                                               headers=headers)
-            transferred = True
-            return response
+                reply = Response(raw, status_code=status, media_type=content_type, headers=headers)
+                if not (_retry and status in (403, 429, 503) and DENIED.search(raw.decode('utf-8', 'replace'))):
+                    return reply
+            else:
+                headers.update({'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+                response = StudioStreamingResponse(upstream, client, status_code=status, media_type=content_type,
+                                                   headers=headers)
+                transferred = True
+                return response
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -245,6 +255,11 @@ class StudioProvider:
                             await upstream.aclose()
                     finally:
                         await client.aclose()
+        # Google refused an account with code 7: restart its AI Studio page and try once more (see _heal_denied)
+        healed = await self.heal_now()
+        if healed and (not account or account in healed):
+            return await self.forward(path, body, incoming, email, _retry=False)
+        return reply
 
     async def models(self):
         if not self.configured:
@@ -291,6 +306,8 @@ class StudioProvider:
                                                                 'tz': 'America/Los_Angeles'})
                     usage = {(g.get('key') or '').lower(): g for g in
                              ((r.json().get('groups') or {}).get('account') or [])} if r.status_code == 200 else {}
+                    if await self._heal_denied(client, accounts, cooldowns):
+                        cooldowns = (await client.get('/api/cooldowns')).json().get('cooldowns') or []
                     ready = (service.get('accounts') or {}).get('ready', 0)
                     if service.get('state') == 'STOPPED' and ready and time.time() - self._service_start_at > 300:
                         self._service_start_at = time.time()
@@ -298,8 +315,8 @@ class StudioProvider:
                         log.warning('AI Studio generation service was stopped; started it (HTTP %s)', started.status_code)
                 finally:
                     await client.aclose()
-                self._accounts = [self._row(a, service, cooldowns, usage, start) for a in accounts
-                                  if isinstance(a, dict) and a.get('id')]
+                self._accounts = [self._row(a, service, cooldowns, usage, start, self.heals.get(str(a['id']).lower()))
+                                  for a in accounts if isinstance(a, dict) and a.get('id')]
                 self._accounts_error = ''
             except Exception as exc:
                 log.warning('AI Studio account list unavailable: %s', type(exc).__name__)
@@ -308,23 +325,28 @@ class StudioProvider:
             return [dict(r) for r in self._accounts], self._accounts_error
 
     @staticmethod
-    def _row(a, service, cooldowns, usage, start):
+    def _row(a, service, cooldowns, usage, start, heal=None):
         email = str(a['id']).lower()
         state = a.get('state') or 'unknown'
         ready = bool(a.get('enabled')) and state in LIVE_STATES
         used = usage.get(email) or {}
-        limits = []
+        limits, denied = [], False
         for c in cooldowns:
             if (c.get('account_id') or '').lower() != email:
                 continue
             reason = str(c.get('reason') or '')
+            denied = denied or bool(DENIED.search(reason))
             m = re.search(r'limit: (\d+)', reason)
             limits.append({'model': c.get('model_id') or '*', 'until': c.get('until'),
                            'kind': reason.split(':', 1)[0].strip() if ':' in reason else (reason[:20] or '冷却'),
                            'limit': int(m.group(1)) if m else None})
         return {'account_id': email, 'label': a.get('label') or email, 'email': email, 'state': state, 'ready': ready,
                 'disabled': not a.get('enabled'), 'models': sorted(a.get('models') or []),
-                'error': '' if ready else str(a.get('message') or '')[:200], 'exit': mask_exit(a.get('egress') or ''),
+                'error': (str(a.get('message') or '')[:200] if not ready else
+                          ('Google 一直拒绝这个账号的 AI Studio 请求（权限码 7），自动重启 %d 次没好；请用这个账号在浏览器打开'
+                           ' aistudio.google.com 发一句话，看官网是否也报错' % heal['count'])
+                          if denied and heal and heal['count'] >= HEAL_TRIES else ''),
+                'exit': mask_exit(a.get('egress') or ''),
                 'locale': a.get('locale') or '', 'timezone': a.get('timezone') or '',
                 'quota': {'source': 'aistudio', 'plan': a.get('benefit_tier') or '未知', 'available': ready,
                           'used': None, 'remaining': None, 'total': None,
@@ -332,6 +354,92 @@ class StudioProvider:
                                          ('requests', 'succeeded', 'failed', 'rate_limited', 'total_tokens')},
                           'day_start': start.isoformat(), 'resets_at': (start + timedelta(days=1)).isoformat(),
                           'limits': limits, 'service_state': service.get('state')}}
+
+    # ------------------------------------------------------------------ automatic repair of "permission denied" pages
+    def _note(self, email, text):
+        log.warning('%s: %s', email, text)
+        if self.on_event:
+            try:
+                self.on_event(email, text)
+            except Exception:  # noqa: BLE001
+                pass
+
+    async def _heal_denied(self, client, accounts, cooldowns):
+        """AI Studio can refuse every request from an account's background page with 403 / code 7 ("The caller does not
+        have permission") - seen for hours right after a server-browser login - while a freshly started page of the same
+        account works at once. Restart that page the way the AIStudio2API admin page does (disable, then enable with the
+        same proxy / locale / time zone) and clear its permission cooldowns. Once per HEAL_GAP per account at most; after
+        HEAL_TRIES restarts in a row the account is left alone for HEAL_PAUSE and the panel says so.
+        Returns the e-mails restarted. Proxies are passed back unchanged and never logged."""
+        denied = {}
+        for c in cooldowns:
+            if DENIED.search(str(c.get('reason') or '')):
+                denied.setdefault((c.get('account_id') or '').lower(), []).append(c.get('scope') or c.get('model_id') or '')
+        async with self._heal_lock:
+            now = time.time()
+            for email, h in list(self.heals.items()):
+                if email not in denied and now - h['at'] > (HEAL_PAUSE if h['count'] >= HEAL_TRIES else HEAL_GAP):
+                    self.heals.pop(email, None)       # stayed healthy since the last restart
+            done = []
+            for a in accounts:
+                email = str(a.get('id') or '').lower() if isinstance(a, dict) else ''
+                if (email not in denied or not a.get('enabled') or a.get('active_requests')
+                        or a.get('state') not in LIVE_STATES):
+                    continue
+                h = self.heals.setdefault(email, {'at': 0.0, 'count': 0})
+                if now - h['at'] < (HEAL_PAUSE if h['count'] >= HEAL_TRIES else HEAL_GAP):
+                    continue
+                if h['count'] >= HEAL_TRIES:
+                    h['count'] = 0
+                h['at'] = now
+                path = '/api/accounts/' + quote(a['id'], safe='')
+                settings = {'label': a.get('label') or a['id'], 'proxy': a.get('proxy') or '',
+                            'locale': a.get('locale') or '', 'timezone': a.get('timezone') or ''}
+                try:
+                    (await client.put(path, json=dict(settings, enabled=False))).raise_for_status()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning('AI Studio page restart of %s failed: %s', email, type(exc).__name__)
+                    continue
+                enabled = False
+                for _ in range(3):          # never leave the account switched off
+                    await asyncio.sleep(1)
+                    try:
+                        (await client.put(path, json=dict(settings, enabled=True))).raise_for_status()
+                        enabled = True
+                        break
+                    except Exception as exc:  # noqa: BLE001
+                        log.warning('AI Studio re-enable of %s failed: %s', email, type(exc).__name__)
+                if not enabled:
+                    self._note(email, 'AI Studio 页面重启时没能重新启用这个账号，请在面板里手动启用')
+                    continue
+                for scope in denied[email]:
+                    if scope:
+                        try:
+                            await client.delete(path + '/cooldowns/' + quote(scope, safe=''))
+                        except Exception:  # noqa: BLE001
+                            pass
+                h['count'] += 1
+                done.append(email)
+                self._note(email, 'AI Studio 以权限码 7 拒绝了这个账号的请求，已自动重启它的 AI Studio 页面（连续第 %d 次）'
+                           % h['count'])
+            return done
+
+    async def heal_now(self):
+        """Run the repair at once (after a request failed with code 7). Returns the e-mails restarted."""
+        try:
+            client = await self._admin(30)
+            try:
+                accounts = (await client.get('/api/accounts')).json().get('accounts') or []
+                cooldowns = (await client.get('/api/cooldowns')).json().get('cooldowns') or []
+                done = await self._heal_denied(client, accounts, cooldowns)
+            finally:
+                await client.aclose()
+        except Exception as exc:  # noqa: BLE001
+            log.warning('AI Studio repair check failed: %s', type(exc).__name__)
+            return []
+        if done:
+            self._accounts_at = 0.0
+        return done
 
     def match(self, rows, email):
         email = (email or '').strip().lower()
