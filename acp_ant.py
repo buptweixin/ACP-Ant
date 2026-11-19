@@ -62,6 +62,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from studio_provider import STUDIO, is_studio_model
+from pi_prompt_compat import rewrite_pi_prompt
 
 __version__ = "1.5.2"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
 
@@ -97,6 +98,7 @@ KEEP_HOURS = float(os.environ.get("AGY_KEEP_HOURS", "6"))      # delete local co
 REQUIRE_PROXY = _env_bool("AGY_REQUIRE_PROXY", False)   # since 1.4.0 a proxy is optional; set 1 to insist on one per account
 DEFAULT_MODEL = os.environ.get("AGY_DEFAULT_MODEL", "gemini-3.8-flash-medium")
 MODEL_FALLBACK = _env_bool("AGY_MODEL_FALLBACK", True)         # unknown model name -> DEFAULT_MODEL instead of an error
+PI_PROMPT_COMPAT = _env_bool("AGY_PI_PROMPT_COMPAT", False)   # opt-in normalization of pi's generated system scaffold
 MAX_IMAGES = _env_int("AGY_MAX_IMAGES", 200)                   # images per request. Measured 2026-11-12: Gemini 3.8 Flash
 # agy cuts a prompt that is too long at the END (about 188 000 characters), which loses the newest input. Keep the
 # whole prompt under this many characters by leaving out the oldest history (0 = no limit).
@@ -1577,6 +1579,11 @@ def _fit_history(history: list[dict], current: list[dict], system_chars: int) ->
 def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_system: str = "", parallel: bool = True) -> tuple[str, list[dict]]:
     """Internal conversation -> (system prompt, ACP prompt blocks). Earlier turns become a transcript (images stay
     in place as image blocks); the trailing user / tool messages are this turn's input."""
+    if PI_PROMPT_COMPAT:
+        compatible_system = rewrite_pi_prompt(system)
+        if compatible_system != system:
+            log.info("pi prompt compatibility: normalized generated scaffold; additional instructions retained")
+        system = compatible_system
     sys_parts = [system] if system else []
     if tools and choice != "none":
         sys_parts.append(tool_instructions(tools, choice, parallel))

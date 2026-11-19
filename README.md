@@ -222,6 +222,19 @@ wire_api = "responses"
 
 **关于 Claude Code**：Google 的 Antigravity 服务端会拒绝带有 Claude Code 特征内容的请求。Claude Code 每次请求都会带一行 `x-anthropic-billing-header` 和一句固定的身份介绍，服务端遇到这两样就返回 `RESOURCE_EXHAUSTED (429)`，和账号额度无关。这是 Google 那边有意的限制，ACP-Ant 不做绕过（绕过有封号风险）。网关会在 2–3 秒内把它当成 429 返回，不会卡住。
 
+### pi 1.5.2 提示词兼容（可选）
+
+实测同一账号、模型和代理下，pi 的完整默认系统提示词会收到 Antigravity 的 `RESOURCE_EXHAUSTED (429)`，
+而简短提示词可以正常回复。遇到这个特定问题时，可在 `gateway.env`（Docker 部署为 `data/gateway.env`）中加入
+`AGY_PI_PROMPT_COMPAT=1` 并重启网关。默认关闭；这不是所有 429 的通用修复，也不改变账号额度或上游错误处理。
+
+启用后，只规范化已识别的 pi 1.5.2 默认框架，支持额外工具、额外工具规则及不同安装路径：
+默认身份介绍、工具清单和文档索引改为简短说明，已知默认规则合并到该说明中；
+额外或修改过的规则、后续追加指令、工作目录、用户消息和实际工具定义保留。不认识的提示词结构保持原样。
+只影响 Antigravity 通道，`aistudio/` 通道不经过这个转换。日志只记录是否应用了兼容处理，不记录提示词或密钥。
+
+离线回归测试（无需账号或网络）：`python3 scripts/pi_prompt_compat_test.py`。
+
 ### 按 OpenAI 兼容接口配置即可（接口已测，软件本身未逐一实测）
 
 | 软件 | 怎么配 |
