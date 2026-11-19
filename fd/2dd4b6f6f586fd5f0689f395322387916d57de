@@ -1,0 +1,33 @@
+gateway.env.example
+  s_45e1a1981065f6::t_5d9110d0b89818 22-25
+pi_prompt_compat.py
+  s_45e1a1981065f6::t_5d9110d0b89818 1-67
+acp_ant.py
+  s_45e1a1981065f6::t_5d9110d0b89818 65,101,1582-1586
+install.sh
+  s_45e1a1981065f6::t_5d9110d0b89818 114
+README.md
+  s_45e1a1981065f6::t_5d9110d0b89818 225-237
+Dockerfile
+  s_45e1a1981065f6::t_5d9110d0b89818 22
+scripts/pi_prompt_compat_test.py
+  s_45e1a1981065f6::t_be41cee5c17ea1 1-113
+scripts/fixtures/pi_1_5_2_system.txt
+  s_45e1a1981065f6::t_7a3b58818db683 1-35
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "fd2dd4b6f6f586fd5f0689f395322387916d57de",
+  "prompts": {},
+  "sessions": {
+    "s_45e1a1981065f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f01b-f431-79a2-912e-c5d4f09e29fa",
+        "model": "gpt-6.1-sol"
+      },
+      "human_author": "buptweixin <weixin.bupt.ml@gmail.com>"
+    }
+  }
+}
