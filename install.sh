@@ -111,7 +111,7 @@ fi
 "$ROOT/venv/bin/python" -m pip install -q --disable-pip-version-check -r "$SRC/requirements.txt" || die "装依赖失败（网络？能不能访问 pypi.org）"
 
 say "复制程序文件"
-install -m 644 "$SRC/acp_ant.py" "$SRC/acp_panel.py" "$SRC/panel.html" "$SRC/studio_provider.py" "$SRC/pi_prompt_compat.py" "$SRC/acp_sessions.py" "$ROOT/"
+install -m 644 "$SRC/acp_ant.py" "$SRC/acp_panel.py" "$SRC/panel.html" "$SRC/studio_provider.py" "$SRC/pi_prompt_compat.py" "$SRC/acp_sessions.py" "$SRC/usage_stats.py" "$ROOT/"
 sed -e "s#^ROOT=\${AGY_ROOT:-/opt/acp-ant}#ROOT=\${AGY_ROOT:-$ROOT}#" \
     -e "s#^AGY=\${AGY_BIN:-\$ROOT/bin/agy}#AGY=\${AGY_BIN:-${AGY_BIN:-$ROOT/bin/agy}}#" \
     "$SRC/scripts/account.sh" > "$ROOT/account.sh.tmp" && mv "$ROOT/account.sh.tmp" "$ROOT/account.sh"

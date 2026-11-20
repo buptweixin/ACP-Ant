@@ -82,6 +82,8 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--line);border-top-color:var(--acc);border-radius:50%;animation:sp 1s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (max-width:520px){.grid{grid-template-columns:1fr}.ev{grid-template-columns:90px 1fr}.ev .a{display:none}header{padding:10px}}
+#usageView .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}#usageView h2{font-size:20px}#usageChart{overflow-x:auto}#usageChart svg{min-width:640px}.usage-filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:16px}.usage-filters label{font-size:12px;color:var(--mute)}.usage-filters input,.usage-filters select{width:auto;max-width:240px}.usage-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.usage-kpis .big{font-size:28px;margin:8px 0}.usage-scroll{overflow-x:auto;margin-top:14px}.usage-table{width:100%;border-collapse:collapse;font-size:12px;white-space:nowrap}.usage-table th{text-align:left;color:var(--mute);font-weight:500;background:var(--panel2)}.usage-table th,.usage-table td{padding:12px;border-bottom:1px solid var(--line)}.usage-table .numeric{text-align:right;font-variant-numeric:tabular-nums}.usage-model{max-width:260px;overflow:hidden;text-overflow:ellipsis}.price-row{display:grid;grid-template-columns:minmax(160px,2fr) repeat(4,minmax(70px,1fr)) 35px;gap:6px;margin:8px 0}.price-row input{min-width:0;width:100%}.usage-empty{padding:45px;text-align:center;color:var(--mute)}
+@media(max-width:800px){.usage-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.usage-filters input,.usage-filters select{max-width:180px}.usage-kpis .big{font-size:24px}}
 </style>
 </head>
 <body>
@@ -102,6 +104,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
     <span class="sp"></span>
     <button class="primary" data-top="add">＋ 添加账号</button>
     <button data-top="quotaAll">刷新全部额度</button>
+    <button data-top="usage" id="usageToggle">用量统计</button>
     <button data-top="proxies">代理记录</button>
     <button onclick="addStudioModal()">＋ 接入 AI Studio</button>
     <button data-top="connect">接入信息</button>
@@ -110,6 +113,7 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
     <button data-top="logout">退出</button>
   </header>
   <main>
+    <div id="accountView">
     <div id="banner"></div>
     <div class="summary" id="summary"></div>
     <div class="grid" id="accounts"></div>
@@ -117,6 +121,24 @@ pre{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:
     <div class="card events" id="events"></div>
     <p class="mute small" style="margin-top:14px">每 10 秒自动刷新。添加账号后不自动读取额度，点「刷新额度」手动读取（不消耗额度）；定时巡检按设置执行。</p>
     <p class="mute small">ACP-Ant · 开源项目</p>
+    </div>
+    <section id="usageView" style="display:none">
+      <div class="row" style="justify-content:space-between"><div><h2 style="margin:0">用量统计</h2><p class="mute small">本网关收到的模型请求 · 时间按当前浏览器时区显示</p></div><button onclick="usagePrices()">配置估算单价</button></div>
+      <div class="usage-filters card">
+        <button onclick="usageRange(1)">今天</button><button onclick="usageRange(7)">近 7 天</button><button onclick="usageRange(30)">近 30 天</button>
+        <label>从 <input type="date" id="usageFrom" aria-label="统计开始日期"></label><label>至 <input type="date" id="usageTo" aria-label="统计结束日期"></label>
+        <select id="usageProvider" aria-label="供应商"><option value="">全部供应商</option><option value="antigravity">Antigravity</option><option value="aistudio">AI Studio</option></select>
+        <select id="usageModel" aria-label="模型"><option value="">全部模型</option></select>
+        <select id="usageOutcome" aria-label="请求结果"><option value="">全部结果</option><option value="success">成功</option><option value="error">失败</option><option value="cancelled">已取消</option></select>
+        <button onclick="loadUsage(true)">刷新</button>
+      </div>
+      <p id="usageError" class="err small" role="alert"></p>
+      <div class="usage-kpis" id="usageKpis"></div>
+      <div class="card" style="margin:16px 0"><div class="row"><b id="usageChartTitle">Token 趋势</b><span class="sp"></span><span class="small mute">蓝：非缓存 · 青：缓存读取</span></div><div id="usageChart"></div></div>
+      <div class="card"><div class="row"><h2 style="margin:0">请求日志</h2><span class="sp"></span><span class="mute small" id="usagePage"></span><button id="usagePrev" onclick="usageOffset=Math.max(0,usageOffset-50);loadUsage()">上一页</button><button id="usageNext" onclick="usageOffset+=50;loadUsage()">下一页</button></div><div class="usage-scroll" id="usageRows"></div></div>
+      <details class="card" style="margin-top:16px"><summary>供应商 / 模型汇总</summary><div class="usage-scroll" id="usageGroups"></div></details>
+      <p class="mute small" id="usageNote">仅统计启用后经过本网关的请求；旧版每日汇总不转换为请求明细。保留最近 90 天，最多 20 万条。</p>
+    </section>
   </main>
 </div>
 
@@ -142,6 +164,55 @@ function ago(ts) { if (!ts) return "从未"; const s = Math.max(0, Date.now() / 
 function until(iso) { if (!iso) return ""; const s = (new Date(iso).getTime() - Date.now()) / 1000; if (s <= 0) return "已重置"; if (s < 3600) return Math.ceil(s / 60) + " 分钟后重置"; if (s < 86400) return Math.floor(s / 3600) + " 小时 " + Math.floor(s % 3600 / 60) + " 分后重置"; return Math.floor(s / 86400) + " 天 " + Math.floor(s % 86400 / 3600) + " 小时后重置"; }
 function num(n) { n = n || 0; return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n); }
 function clock(ts) { const d = new Date(ts * 1000); return (d.getMonth() + 1) + "-" + d.getDate() + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0") + ":" + String(d.getSeconds()).padStart(2, "0"); }
+let usageVisible=false, usageOffset=0, usageData=null, usageSeq=0;
+const usageDate = d => d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0");
+const usageMoney = n => n === null ? "—" : "$"+n.toFixed(n<1?6:4);
+function toggleUsage(){usageVisible=!usageVisible;$("#accountView").style.display=usageVisible?"none":"block";$("#usageView").style.display=usageVisible?"block":"none";$("#usageToggle").textContent=usageVisible?"返回账号":"用量统计";if(usageVisible){if(!$("#usageFrom").value)usageRange(1);else loadUsage();}}
+function usageRange(days){const end=new Date(),start=new Date();start.setDate(start.getDate()-days+1);$("#usageFrom").value=usageDate(start);$("#usageTo").value=usageDate(end);loadUsage(true);}
+for(const id of ["usageFrom","usageTo","usageModel","usageProvider","usageOutcome"]) $("#"+id).onchange=()=>loadUsage(true);
+async function loadUsage(reset=false){
+  if(reset)usageOffset=0;
+  const seq=++usageSeq;
+  try{
+    const from=new Date($("#usageFrom").value+"T00:00:00"),end=new Date($("#usageTo").value+"T00:00:00");end.setDate(end.getDate()+1);
+    if(!Number.isFinite(+from)||!Number.isFinite(+end)||end<=from)throw Error("请选择有效的日期范围");
+    const q=new URLSearchParams({start:+from/1000,end:+end/1000,model:$("#usageModel").value,provider:$("#usageProvider").value,outcome:$("#usageOutcome").value,offset:usageOffset});
+    const d=await api("/usage?"+q);if(seq!==usageSeq)return;usageData=d;$("#usageError").textContent="";
+    const chosen=$("#usageModel").value,models=[...new Set(d.options.map(r=>r.model))];if(chosen&&!models.includes(chosen))models.push(chosen);
+    $("#usageModel").innerHTML='<option value="">全部模型</option>'+models.map(m=>'<option value="'+esc(m)+'">'+esc(m)+'</option>').join("");$("#usageModel").value=chosen;
+    const t=d.summary;
+    $("#usageKpis").innerHTML=[
+      ["估算成本",t.requests&&t.unpriced===t.requests?"未计价":usageMoney(t.cost),t.unpriced?`${t.unpriced} 条未计价；显示已计价部分`:"按当前配置单价 · 非实际账单"],
+      ["总请求数",t.requests.toLocaleString(),`成功 ${t.success} · 失败 ${t.errors} · 取消 ${t.cancelled}`],
+      ["处理 Tokens",num(t.tokens),`非缓存 ${num(t.uncached_tokens)} · 未知用量 ${t.unknown} 条`],
+      ["缓存命中率",t.cache_rate===null?"—":(t.cache_rate*100).toFixed(1)+"%",`缓存读取 ${num(t.cache_read)} / 总输入 ${num(t.input)}`]
+    ].map(([a,b,c])=>'<div class="card"><div class="mute small">'+esc(a)+'</div><div class="big">'+esc(b)+'</div><div class="mute small">'+esc(c)+'</div></div>').join("");
+    $("#usageNote").textContent=`Token 按上游报告记录，输入已含缓存，输出已含思考，不重复累加。${t.partial} 条用量不完整、${t.unknown} 条未报告；不会将未知用量当作零消耗。费用按当前单价估算，不代表订阅实际扣费。仅记录启用后的本网关请求，保留 90 天 / 最多 20 万条，不保存提示词或密钥。`;
+    renderUsageChart(d);
+    const heads=["时间","供应商 / 账号","模型","结果 / HTTP","用量","估算成本","新增输入","输出（含思考）","缓存读取","缓存写入","耗时","尝试"];
+    const rows=d.rows.map(r=>{const known=r.usage_state!=="unknown";return '<tr><td>'+esc(clock(r.started))+'</td><td>'+esc(r.provider)+(r.accounts.length?'<br><span class="mute">'+esc(r.accounts.join(", "))+'</span>':"")+'</td><td class="usage-model" title="'+esc(r.model)+'">'+esc(r.model)+'</td><td><span style="color:var(--'+(r.outcome==="success"?"ok":r.outcome==="cancelled"?"warn":"bad")+')">'+esc(({success:"成功",error:"失败",cancelled:"取消"})[r.outcome]||r.outcome)+'</span> / '+esc(r.http_status||"—")+(r.error_kind?'<br>'+esc(r.error_kind):"")+'</td><td>'+esc(({reported:"已报告",partial:"部分报告",unknown:"未报告"})[r.usage_state])+'</td><td class="numeric">'+usageMoney(r.cost)+'</td>'+[r.uncached_input,r.output,r.cache_read,r.cache_write].map(n=>'<td class="numeric">'+(known?n.toLocaleString():"—")+'</td>').join("")+'<td class="numeric">'+(r.duration_ms/1000).toFixed(2)+'s</td><td class="numeric">'+r.attempts+'</td></tr>';}).join("");
+    $("#usageRows").innerHTML=rows?'<table class="usage-table"><thead><tr>'+heads.map(h=>'<th>'+esc(h)+'</th>').join("")+'</tr></thead><tbody>'+rows+'</tbody></table>':'<div class="usage-empty">这个时间范围内还没有请求记录</div>';
+    $("#usagePage").textContent=`共 ${t.requests} 条 · 第 ${Math.floor(usageOffset/50)+1} 页`;$("#usagePrev").disabled=usageOffset===0;$("#usageNext").disabled=usageOffset+50>=t.requests;
+    $("#usageGroups").innerHTML='<table class="usage-table"><thead><tr><th>供应商</th><th>模型</th><th>请求数</th><th>Tokens</th><th>估算成本</th></tr></thead><tbody>'+d.groups.map(g=>'<tr><td>'+esc(g.provider)+'</td><td>'+esc(g.model)+'</td><td>'+g.requests+'</td><td>'+num(g.tokens)+'</td><td>'+usageMoney(g.unpriced===g.requests?null:g.cost)+(g.unpriced?'（'+g.unpriced+' 条未计价）':"")+'</td></tr>').join("")+'</tbody></table>';
+  }catch(e){if(seq===usageSeq)$("#usageError").textContent=e.message;}
+}
+function renderUsageChart(d){
+  $("#usageChartTitle").textContent=d.step===3600?"Tokens · 按小时":"Tokens · 按天";
+  if(!d.summary.tokens){$("#usageChart").innerHTML='<div class="usage-empty">暂无已报告的 Token 用量</div>';return;}
+  const w=1000,h=220,left=60,top=20,bottom=35,max=Math.max(1,...d.series.map(b=>b.tokens)),plot=h-top-bottom,bw=(w-left-10)/d.series.length;
+  let svg='<svg viewBox="0 0 '+w+' '+h+'" width="100%" role="img" aria-label="按时间统计的 Token 用量，青色为缓存读取"><title>Token 用量趋势</title>';
+  for(let i=0;i<=4;i++){const y=top+plot*i/4;svg+='<line x1="'+left+'" x2="990" y1="'+y+'" y2="'+y+'" stroke="var(--line)"/><text x="50" y="'+(y+4)+'" fill="var(--mute)" font-size="11" text-anchor="end">'+num(max*(4-i)/4)+'</text>';}
+  d.series.forEach((b,i)=>{const x=left+i*bw+2,total=b.tokens/max*plot,cache=b.cache_read/max*plot;const label=new Date(b.at*1000).toLocaleString(undefined,d.step===3600?{hour:'2-digit',minute:'2-digit',hour12:false}:{month:'2-digit',day:'2-digit'});svg+='<g><title>'+esc(label+': '+b.tokens.toLocaleString()+' Tokens，缓存 '+b.cache_read.toLocaleString()+'，'+b.requests+' 次请求')+'</title><rect x="'+x+'" y="'+(top+plot-total)+'" width="'+Math.max(1,bw-4)+'" height="'+Math.max(0,total-cache)+'" fill="var(--acc)"/><rect x="'+x+'" y="'+(top+plot-cache)+'" width="'+Math.max(1,bw-4)+'" height="'+cache+'" fill="#109caf"/></g>';if(i%Math.ceil(d.series.length/12)===0)svg+='<text x="'+(x+bw/2)+'" y="210" text-anchor="middle" fill="var(--mute)" font-size="11">'+esc(label)+'</text>';});
+  $("#usageChart").innerHTML=svg+'</svg>';
+}
+function usagePrices(){
+  if(!usageData)return;
+  openModal('<h2>模型估算单价</h2><p class="mute small">单位：美元 / 百万 Token。按完整请求模型名匹配；不配置则不估算。修改后历史记录按新单价重新估算，订阅实际扣费请以供应商为准。</p><div style="overflow:auto"><div style="min-width:650px"><div class="price-row small mute"><span>模型</span><span>新增输入</span><span>输出含思考</span><span>缓存读取</span><span>缓存写入</span><span></span></div><div id="priceRows"></div></div></div><button id="priceAdd">＋ 添加模型</button><p id="priceErr" class="err small"></p><div class="actions"><button onclick="closeModal()">取消</button><button class="primary" id="priceSave">保存单价</button></div>');
+  function add(model="",rates={}){const row=document.createElement("div");row.className="price-row";row.innerHTML='<input aria-label="完整模型名" placeholder="gemini-4-hydrogen" value="'+esc(model)+'">'+["input","output","cache_read","cache_write"].map(k=>'<input aria-label="'+esc(k)+' 单价" type="number" step="any" min="0" placeholder="未设置" value="'+esc(rates[k]??"")+'">').join("")+'<button aria-label="删除此单价">×</button>';row.querySelector("button").onclick=()=>row.remove();$("#priceRows").appendChild(row);}
+  Object.entries(usageData.prices).forEach(([m,r])=>add(m,r));$("#priceAdd").onclick=()=>add();if(!Object.keys(usageData.prices).length)add($("#usageModel").value);
+  $("#priceSave").onclick=async()=>{try{const prices=Object.create(null);for(const row of document.querySelectorAll("#priceRows .price-row")){const inputs=[...row.querySelectorAll("input")],m=inputs[0].value.trim();if(!m||Object.hasOwn(prices,m)||inputs.slice(1).some(x=>!x.value.trim()||!Number.isFinite(Number(x.value))||Number(x.value)<0))throw Error("请填写不重复的模型名和四项非负单价");prices[m]=Object.fromEntries(["input","output","cache_read","cache_write"].map((k,i)=>[k,Number(inputs[i+1].value)]));}await api("/usage/prices",{body:{prices}});closeModal();toast("单价已保存","ok");loadUsage();}catch(e){$("#priceErr").textContent=e.message;}};
+}
+
 const GROUP = {"Gemini Models": "Gemini 模型", "Claude and GPT models": "Claude / GPT 模型", "Gemini 4 Argon": "Gemini 4 Argon"};
 const WIN = {"weekly": "每周", "5h": "5 小时"};
 const KIND = {VERIFY: "需要 Google 验证", QUOTA: "额度用完", RATE_LIMIT: "被限流", UPSTREAM_LIMIT: "上游拒绝(429)", AUTH: "登录失效", BLOCKED: "审核拦截",
@@ -166,6 +237,7 @@ async function refresh() {
     DATA = await api("/overview");
     const ev = await api("/events");
     render(); renderEvents(ev.events);
+    if (usageVisible) loadUsage();
   } catch (e) { if (e.message !== "请先登录") $("#srvPill").innerHTML = '<span class="dot" style="background:var(--bad)"></span><span>连不上：' + esc(e.message) + "</span>"; }
 }
 
@@ -525,6 +597,7 @@ function checkStep(name) {
 async function topAction(what, btn) {
   try {
     if (what === "add") addModal();
+    if (what === "usage") toggleUsage();
     if (what === "logout") { await api("/logout", {body: {}}); showLogin(); }
     if (what === "quotaAll") { await busy(btn, () => api("/quota-all", {body: {}})); toast("全部额度已刷新", "ok"); refresh(); }
     if (what === "connect") await connectModal();

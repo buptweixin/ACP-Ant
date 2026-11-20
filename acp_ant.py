@@ -63,9 +63,10 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from studio_provider import STUDIO, is_studio_model
 from pi_prompt_compat import rewrite_pi_prompt
+from usage_stats import CURRENT as USAGE_CURRENT, Ledger, UsageMiddleware
 from acp_sessions import SessionCache, SessionRecord, digest, fingerprints
 
-__version__ = "1.5.2-fork.1"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
+__version__ = "1.5.2-fork.2"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
 
 log = logging.getLogger("acp-ant")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -717,6 +718,7 @@ class Stats:
 
 
 STATS = Stats(os.path.join(ROOT, "stats.json"))
+USAGE_LEDGER = Ledger(os.path.join(ROOT, "usage.sqlite3"))
 
 
 class Pool:
@@ -1163,6 +1165,12 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
         tried.add(acc.name)
         emitted = False
         tok_in = tok_out = 0
+        usage_state = USAGE_CURRENT.get()
+        measured_before = usage_state.measured if usage_state else 0
+        if usage_state:
+            usage_state.attempts += 1
+            if acc.name not in usage_state.accounts: usage_state.accounts.append(acc.name)
+            usage_state.model = usage_state.model or model_name
         t0 = time.time()
         try:
             async for kind, text in run_on(acc, model, effort, system, blocks, deadline):
@@ -1171,6 +1179,7 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
                 elif kind == "usage":
                     try:
                         u = json.loads(text)
+                        if usage_state: usage_state.acp(u)
                         tok_in += int(u.get("inputTokens") or 0) + int(u.get("cachedReadTokens") or 0)
                         tok_out += int(u.get("outputTokens") or 0) + int(u.get("thoughtTokens") or 0)
                     except (ValueError, TypeError):
@@ -1178,10 +1187,12 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
                 yield kind, text, acc.name
             acc.ok += 1
             acc.last_ok_at = time.time()
+            if usage_state: usage_state.error_kind = ""
             STATS.record(acc.name, True, tok_in, tok_out)
             log.info("ok account=%s model=%s %.1fs", acc.name, model_name, time.time() - t0)
             return
         except AcpError as e:
+            if usage_state: usage_state.error_kind = e.kind
             last = e
             acc.fail += 1
             STATS.record(acc.name, False)
@@ -1214,6 +1225,8 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
             if emitted or e.kind in ("BLOCKED", "UNKNOWN_MODEL", "BAD_REQUEST"):
                 raise
         finally:
+            if usage_state and usage_state.measured == measured_before:
+                usage_state.missing_attempts += 1
             POOL.release(acc)
     raise last or AcpError("no usable Antigravity account for %s (all cooling down, logged out or disabled)" % model_name, "NO_ACCOUNT")
 
@@ -2054,6 +2067,7 @@ def est_prompt(system: str, blocks: list[dict]) -> int:
 # ======================================================================================================
 
 app = FastAPI(title="ACP-Ant", version=__version__, docs_url=None, redoc_url=None, openapi_url=None)
+app.add_middleware(UsageMiddleware, ledger=USAGE_LEDGER)
 
 
 @app.exception_handler(BadContent)
@@ -2073,6 +2087,8 @@ def check_key(request: Request) -> None:
     token = auth[7:] if auth[:7].lower() == "bearer " else (request.headers.get("x-api-key") or request.headers.get("api-key") or "")
     if not API_KEY or not secrets.compare_digest(token.encode(), API_KEY.encode()):
         raise HTTPException(401, "unauthorized")
+    if USAGE_CURRENT.get() is not None:
+        USAGE_CURRENT.get().authorized = True
     select_account(request)
 
 
@@ -2150,6 +2166,10 @@ async def _read_body(request: Request) -> dict:
         raise HTTPException(400, "body is not valid JSON")
     if not isinstance(body, dict):
         raise HTTPException(400, "body must be a JSON object")
+    state = USAGE_CURRENT.get()
+    if state is not None:
+        state.model = body.get("model") if isinstance(body.get("model"), str) else DEFAULT_MODEL
+        state.provider = "aistudio" if is_studio_model(state.model) else "antigravity"
     return body
 
 
@@ -2679,6 +2699,7 @@ async def _stats_saver() -> None:
 @app.on_event("shutdown")
 async def _shutdown() -> None:
     STATS.save()
+    await asyncio.to_thread(USAGE_LEDGER.close)
     for a in POOL.accounts.values():
         await a.stop_processes()
 

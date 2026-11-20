@@ -19,6 +19,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
 import anyio
+from usage_stats import CURRENT as USAGE_CURRENT
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 log = logging.getLogger('acp-ant.studio')
@@ -214,6 +215,10 @@ class StudioProvider:
         except ImportError:
             return self._error(503, 'AI Studio integration requires the optional httpx dependency')
         payload = dict(body, model=native)     # AIStudio2API uses the real model id; the prefix only routes here
+        state = USAGE_CURRENT.get()
+        if state:
+            state.attempts += 1
+            if account and account not in state.accounts: state.accounts.append(account)
         upstream, transferred = None, False
         try:
             upstream = await client.send(client.build_request('POST', path, json=payload,
@@ -258,6 +263,7 @@ class StudioProvider:
         # Google refused an account with code 7: restart its AI Studio page and try once more (see _heal_denied)
         healed = await self.heal_now()
         if healed and (not account or account in healed):
+            if state: state.missing_attempts += 1
             return await self.forward(path, body, incoming, email, _retry=False)
         return reply
 

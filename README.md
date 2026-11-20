@@ -1,3 +1,4 @@
+> 新增 [用量统计面板](USAGE.md)：请求明细、Token / 缓存、趋势和可配置单价的费用估算。
 > 此 fork 增加了可选的 **ACP 会话复用 / 增量消息**和 **pi system prompt 兼容处理**。
 > 配置、协议依据、已知边界及测试见 [SESSION_REUSE.md](SESSION_REUSE.md)。功能默认关闭，可独立回退；AI Studio 路径保持独立。
 

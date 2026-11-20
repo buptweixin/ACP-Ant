@@ -1111,6 +1111,29 @@ async def api_events(request: Request):
     return {"events": list(core.EVENTS)[-200:][::-1]}
 
 
+@router.get("/panel/api/usage")
+async def api_usage(request: Request, start: float, end: float, model: str = "", provider: str = "",
+                    outcome: str = "", offset: int = 0, limit: int = 50):
+    require(request)
+    if offset < 0 or not 1 <= limit <= 100 or len(model) > 200 or provider not in ("", "antigravity", "aistudio") or outcome not in ("", "success", "error", "cancelled"):
+        raise HTTPException(400, "筛选参数无效")
+    try:
+        return await asyncio.to_thread(core.USAGE_LEDGER.query, start, end, model, provider, outcome, offset, limit)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+
+
+@router.post("/panel/api/usage/prices")
+async def api_usage_prices(request: Request):
+    require(request, True)
+    body = await body_of(request)
+    try:
+        await asyncio.to_thread(core.USAGE_LEDGER.set_prices, body.get("prices"))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from None
+    return {"ok": True}
+
+
 @router.post("/panel/api/settings")
 async def api_settings(request: Request):
     require(request, True)
