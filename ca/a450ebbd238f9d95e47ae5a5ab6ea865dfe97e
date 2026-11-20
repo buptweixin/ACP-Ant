@@ -1,0 +1,50 @@
+acp_ant.py
+  s_45e1a1981065f6::t_49d6be0465e244 66,721,1168-1173,1182,1190,1195,1228-1229,2070,2090-2091,2169-2172
+  s_45e1a1981065f6::t_124e86074ed1c7 69
+  s_45e1a1981065f6::t_75d0869c93bf98 2702
+install.sh
+  s_45e1a1981065f6::t_49d6be0465e244 114
+CHANGELOG.md
+  s_45e1a1981065f6::t_124e86074ed1c7 6-11
+README.md
+  s_45e1a1981065f6::t_124e86074ed1c7 1
+USAGE.md
+  s_45e1a1981065f6::t_124e86074ed1c7 1-43
+panel.html
+  s_45e1a1981065f6::t_fe97814ded0e33 86,107,116,124-141,167-195,197-204,206-209,211-215,240,600
+  s_45e1a1981065f6::t_29af109706bc28 210
+  s_45e1a1981065f6::t_231f2e0e73826a 85,196,205
+studio_provider.py
+  s_45e1a1981065f6::t_49d6be0465e244 22,218-221,266
+scripts/usage_stats_test.py
+  s_45e1a1981065f6::t_58e1558b23fa8d 41-42
+  s_45e1a1981065f6::t_29af109706bc28 1-21,23-35,43-50,52-87,89-97,99-116,138-162
+  s_45e1a1981065f6::t_75d0869c93bf98 22,36-40,51,88,98
+  s_45e1a1981065f6::t_124e86074ed1c7 117-137
+.github/workflows/context-tests.yml
+  s_45e1a1981065f6::t_2829dd1f789ce4 19
+acp_panel.py
+  s_45e1a1981065f6::t_49d6be0465e244 1114-1136
+usage_stats.py
+  s_45e1a1981065f6::t_75d0869c93bf98 29,31-32,36-44,47,99-101,234-237
+  s_45e1a1981065f6::t_58e1558b23fa8d 83,95-96,98,125
+  s_45e1a1981065f6::t_d7de2fbd4e33df 1-28,30,33-35,45-46,48-82,84-94,97,102-124,126-233,238-294
+Dockerfile
+  s_45e1a1981065f6::t_49d6be0465e244 22
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "caa450ebbd238f9d95e47ae5a5ab6ea865dfe97e",
+  "prompts": {},
+  "sessions": {
+    "s_45e1a1981065f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f01b-f431-79a2-912e-c5d4f09e29fa",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "buptweixin <weixin.bupt.ml@gmail.com>"
+    }
+  }
+}
