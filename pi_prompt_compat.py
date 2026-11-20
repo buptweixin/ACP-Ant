@@ -13,15 +13,10 @@ _HEADER = (
     "You are a coding assistant running inside pi, a coding agent harness. "
     "Help users inspect files, run commands, and modify code."
 )
-_DEFAULT_RULES = frozenset((
-    "- Use bash for file operations like ls, rg, find",
-    "- Use read to examine files instead of cat or sed.",
+# Preserve operational rules (tool selection, safe editing, response format).
+# Only this known harness-introspection hint is unrelated to normal client work.
+_FRAMEWORK_RULES = frozenset((
     "- You can inspect PI_* environment variables for current model and session details.",
-    "- Use edit for targeted changes. Batch changes to one file in a single call.",
-    "- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.",
-    "- Use write only for new files or complete rewrites.",
-    "- Be concise in your responses",
-    "- Show file paths clearly when working with files",
 ))
 _DOC_LINES = (
     "Pi documentation (read only when the user asks about the harness itself, its SDK, extensions, themes, skills, or TUI):",
@@ -60,8 +55,8 @@ def rewrite_pi_prompt(system: str) -> str:
     if not match or not _is_inventory(match["tools"]) or not _is_default_docs(match["docs"]):
         return system
     # The inventory duplicates tool schemas sent separately by the client.
-    # Keep every additional/modified rule verbatim, including its line endings.
+    # Keep operational and additional/modified rules verbatim, including line endings.
     rules = "".join(line for line in match["rules"].splitlines(keepends=True)
-                    if line.rstrip("\r\n") not in _DEFAULT_RULES)
+                    if line.rstrip("\r\n") not in _FRAMEWORK_RULES)
     preserved = "\n\n<rules>" + rules + "</rules>" if rules.strip() else ""
     return COMPAT_SYSTEM + preserved + system[match.end():]

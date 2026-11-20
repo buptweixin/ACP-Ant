@@ -19,15 +19,48 @@ import acp_ant as core
 
 SYSTEM = (Path(__file__).parent / 'fixtures/pi_1_5_2_system.txt').read_text()
 SUFFIX = SYSTEM[SYSTEM.index('</docs>') + len('</docs>'):]
+EXPECTED_RULES = '''
+- Use bash for file operations like ls, rg, find
+- Use read to examine files instead of cat or sed.
+- Use edit for targeted changes. Batch changes to one file in a single call.
+- Each edits[].oldText must exactly and uniquely match the original file. Keep matches short and non-overlapping; merge nearby changes without including large unchanged regions.
+- Use write only for new files or complete rewrites.
+- Be concise in your responses
+- Show file paths clearly when working with files
+'''
+EXPECTED = COMPAT_SYSTEM + '\n\n<rules>' + EXPECTED_RULES + '</rules>' + SUFFIX
 
 
 class PiPromptCompatTest(unittest.TestCase):
     def test_default_scaffold_and_cwd(self):
-        self.assertEqual(rewrite_pi_prompt(SYSTEM), COMPAT_SYSTEM + SUFFIX)
+        self.assertEqual(rewrite_pi_prompt(SYSTEM), EXPECTED)
+
+    def test_operational_rules_survive_without_default_framework_markers(self):
+        rewritten = rewrite_pi_prompt(SYSTEM)
+        for line in EXPECTED_RULES.splitlines():
+            if line:
+                self.assertIn(line, rewritten)
+        for marker in ('running inside pi', 'PI_*', 'Pi documentation', '/opt/pi/', '<docs>'):
+            self.assertNotIn(marker, rewritten)
+
+    def test_pi_mentions_in_custom_policy_and_user_content_are_preserved(self):
+        policy = '- Project requirement: keep pi plugin compatibility.\n'
+        text = SYSTEM.replace('</rules>', policy + '</rules>')
+        self.assertIn(policy, rewrite_pi_prompt(text))
+        message = 'Fix /workspace/pi/plugin.ts and document PI_API_KEY.'
+        tools = [{'name': 'pi_lookup', 'description': 'Look up pi project metadata',
+                  'parameters': {'type': 'object', 'properties': {'pi_id': {'type': 'string'}}}}]
+        messages = [{'role': 'user', 'parts': [{'type': 'text', 'text': message}]}]
+        with patch.object(core, 'PI_PROMPT_COMPAT', True):
+            system, blocks = core.to_acp(text, messages, tools, 'auto')
+        self.assertIn(message, str(blocks))
+        self.assertIn('"name": "pi_lookup"', system)
+        self.assertIn('"pi_id"', system)
+        self.assertIn(policy, system)
 
     def test_different_installation_paths(self):
         text = SYSTEM.replace('/opt/pi/node_modules/pi-coding-agent', '/home/example/.local/lib/pi')
-        self.assertEqual(rewrite_pi_prompt(text), COMPAT_SYSTEM + SUFFIX)
+        self.assertEqual(rewrite_pi_prompt(text), EXPECTED)
 
     def test_expanded_inventory_and_additional_rules(self):
         # A four-tool-only fingerprint misses real pi setups with extensions.
@@ -46,7 +79,7 @@ class PiPromptCompatTest(unittest.TestCase):
 
     def test_additional_instructions_are_preserved_verbatim(self):
         suffix = '\n\nPROJECT POLICY\r\n  Keep secrets private.\nNever invent tool output.\n'
-        self.assertEqual(rewrite_pi_prompt(SYSTEM + suffix), COMPAT_SYSTEM + SUFFIX + suffix)
+        self.assertEqual(rewrite_pi_prompt(SYSTEM + suffix), EXPECTED + suffix)
 
     def test_unknown_prompts_and_incomplete_scaffolds_are_unchanged(self):
         for text in ('', 'Custom system prompt', 'Prefix policy\n' + SYSTEM,
