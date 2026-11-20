@@ -1,0 +1,21 @@
+name: Context and session regressions
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.12', '3.14']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install -r requirements.txt
+      - name: Offline regressions (no accounts or model requests)
+        run: |
+          for test in pi_prompt_compat session_reuse prompt_fit soft_error content image_limit model_route quota_flow token_login studio studio_heal video_mode; do
+            python "scripts/${test}_test.py" || exit 1
+          done

@@ -19,7 +19,7 @@ WORKDIR /app
 COPY requirements.txt /app/
 RUN pip install -r requirements.txt
 
-COPY acp_ant.py acp_panel.py panel.html studio_provider.py pi_prompt_compat.py CHANGELOG.md /app/
+COPY acp_ant.py acp_panel.py panel.html studio_provider.py acp_sessions.py pi_prompt_compat.py CHANGELOG.md /app/
 COPY scripts/ /app/scripts/
 COPY docker/entrypoint.sh /usr/local/bin/acp-ant-entrypoint
 COPY docker/account.sh /usr/local/bin/account.sh

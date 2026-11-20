@@ -63,8 +63,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from studio_provider import STUDIO, is_studio_model
 from pi_prompt_compat import rewrite_pi_prompt
+from acp_sessions import SessionCache, SessionRecord, digest, fingerprints
 
-__version__ = "1.5.2"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
+__version__ = "1.5.2-fork.1"     # keep in step with the newest heading in CHANGELOG.md (the panel compares against it)
 
 log = logging.getLogger("acp-ant")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -100,9 +101,13 @@ DEFAULT_MODEL = os.environ.get("AGY_DEFAULT_MODEL", "gemini-3.8-flash-medium")
 MODEL_FALLBACK = _env_bool("AGY_MODEL_FALLBACK", True)         # unknown model name -> DEFAULT_MODEL instead of an error
 PI_PROMPT_COMPAT = _env_bool("AGY_PI_PROMPT_COMPAT", False)   # opt-in normalization of pi's generated system scaffold
 MAX_IMAGES = _env_int("AGY_MAX_IMAGES", 200)                   # images per request. Measured 2026-11-12: Gemini 3.8 Flash
-# agy cuts a prompt that is too long at the END (about 188 000 characters), which loses the newest input. Keep the
-# whole prompt under this many characters by leaving out the oldest history (0 = no limit).
+# Observed single-input cutoff is near 192 kB of UTF-8, not a model context-window limit.
+# Legacy variable name retained: stateless history fitting now counts UTF-8 bytes.
 MAX_PROMPT_CHARS = _env_int("AGY_MAX_PROMPT_CHARS", 150_000)
+MAX_PROMPT_BYTES = _env_int("AGY_MAX_PROMPT_BYTES", 180_000)
+SESSION_REUSE = _env_bool("AGY_SESSION_REUSE", False)
+SESSIONS = SessionCache(_env_int("AGY_SESSION_CACHE_SIZE", 64), _env_int("AGY_SESSION_TTL", 1800))
+SESSION_PLAN: contextvars.ContextVar = contextvars.ContextVar("acp_session_plan", default=None)
 HISTORY_TOOL_RESULT_CHARS = 20_000      # a single old tool result longer than this is shortened (head + tail)
 #   saw all of 200 numbered images in order; 250 made Antigravity stop with "agent execution terminated". Images of the
 #   latest message are never dropped (more than this is a 400); only older turns' images give way, oldest first.
@@ -423,9 +428,12 @@ class Turn:
         self.queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self.allowed, self.cwd = allowed, cwd
         self.violation = ""
+        self.cacheable = True
 
     def on_update(self, update: dict) -> None:
         kind = update.get("sessionUpdate")
+        if kind in ("compaction_update", "compaction_summary_chunk"):
+            self.cacheable = False
         content = update.get("content") or {}
         if kind in ("agent_message_chunk", "agent_thought_chunk") and isinstance(content, dict) and content.get("type") == "text":
             self.queue.put_nowait(("text" if kind == "agent_message_chunk" else "thought", content.get("text") or ""))
@@ -460,6 +468,7 @@ class AcpProcess:
         self.reader_task: asyncio.Task | None = None
         self.lock = asyncio.Lock()
         self.sessions = 0          # sessions opened since this process started (for recycling)
+        self.epoch = 0
 
     @property
     def alive(self) -> bool:
@@ -472,6 +481,8 @@ class AcpProcess:
             await self._start()
 
     async def _start(self) -> None:
+        SESSIONS.discard_process(self)
+        self.epoch += 1
         a = self.acc
         if self.media:
             # HOME holds nothing but the request directories; TMPDIR moves read_file's free zone away from the shared
@@ -563,12 +574,15 @@ class AcpProcess:
         rid = self.next_id
         fut = asyncio.get_running_loop().create_future()
         self.pending[rid] = fut
-        await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
         try:
+            await self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
             return await asyncio.wait_for(fut, timeout)
         except asyncio.TimeoutError:
-            self.pending.pop(rid, None)
             raise AcpError(f"{method} timed out ({timeout:.0f}s)", "TIMEOUT")
+        finally:
+            self.pending.pop(rid, None)
+            if not fut.done():
+                fut.cancel()
 
     async def notify(self, method: str, params: dict) -> None:
         await self._send({"jsonrpc": "2.0", "method": method, "params": params})
@@ -594,13 +608,14 @@ class AcpProcess:
     async def maybe_recycle(self) -> None:
         """Restart a shared process now and then (when idle) so a long-running one never accumulates state."""
         # only when this finishing request is the account's last one in flight (none still opening a session)
-        if not PROCESS_PER_SESSION and self.sessions >= RECYCLE_SESSIONS and not self.turns and self.acc.inflight <= 1:
+        if not PROCESS_PER_SESSION and self.sessions >= RECYCLE_SESSIONS and not self.turns and self.acc.inflight <= 1 and not SESSIONS.has_process(self):
             log.info("account %s: recycling acp process after %d sessions", self.label, self.sessions)
             await self.stop()
             if not self.media:     # the video-mode process starts again with its next request
                 asyncio.create_task(self.prewarm())
 
     async def stop(self) -> None:
+        SESSIONS.discard_process(self)
         if self.alive:
             self.proc.terminate()
             try:
@@ -755,6 +770,14 @@ class Pool:
             cands = [a for a in cands if not wanted.isdisjoint(a.models)]
         if not cands:
             return None
+        plan = SESSION_PLAN.get()
+        if plan:
+            cached = [r for r in SESSIONS.candidates(plan["scope"], plan["history"])
+                      if not any(m["role"] == "assistant" for m in plan["messages"][len(r.history):])]
+            preferred = {r.account for r in cached}
+            sticky = [a for a in cands if a.name in preferred]
+            if sticky:
+                cands = sticky
         # least busy first; among equals the one unused for longest (real round-robin, quota spreads evenly)
         cands.sort(key=lambda a: (a.inflight, a.last_pick))
         return cands[0]
@@ -860,43 +883,123 @@ def pinned_email(model: Any) -> str:
     return pin[1] if pin else ""
 
 
+async def close_cached(record: SessionRecord) -> None:
+    if record.process.alive and record.process.epoch == record.epoch:
+        try:
+            await record.process.request("session/close", {"sessionId": record.session["sessionId"]}, 5)
+        except Exception:
+            pass
+
+
+async def reap_sessions() -> None:
+    for record in SESSIONS.evict():
+        await close_cached(record)
+
+
+def check_prompt_budget(system: str, blocks: list[dict]) -> None:
+    images = sum(b["type"] == "image" for b in blocks)
+    if images > MAX_IMAGES:
+        raise AcpError("too many images in this ACP input: %d (maximum %d). Compact the history or reduce attachments." % (images, MAX_IMAGES), "BAD_REQUEST")
+    size = len(system.encode("utf-8")) + sum(len(b.get("text", "").encode("utf-8")) for b in blocks)
+    if MAX_PROMPT_BYTES > 0 and size > MAX_PROMPT_BYTES:
+        raise AcpError("context_length_exceeded: ACP input is %d UTF-8 bytes; this gateway allows %d. "
+                       "Compact the conversation or reduce the latest tool output. A missing/expired session "
+                       "requires the full history to fit again. No content was sent to the model." %
+                       (size, MAX_PROMPT_BYTES), "BAD_REQUEST")
+
+
 async def run_on(acc: Account, model: str, effort: str | None, system: str, blocks: list[dict], deadline: float) -> AsyncIterator[tuple[str, str]]:
-    """One attempt on one account: new session -> model / thought level -> prompt -> stream (kind, text) -> close.
-    Blocks of type "media" (video mode) are written to a fresh request directory, sent as resource links to the
-    account's video-mode process, and deleted afterwards."""
+    """Lease an exact-prefix session, or create a fresh one; commit only on success."""
     has_media = any(b["type"] == "media" for b in blocks)
     acp = acc.media_acp() if has_media else acc.acp
     assert acp is not None
     await acp.ensure()
-    req_dir, turn, sid = "", Turn(), None
+    await reap_sessions()
+    plan = SESSION_PLAN.get() if not has_media else None
+    # A plan belongs only to its prepared input, never to unrelated internal calls.
+    if plan and (plan["system"] != system or plan["blocks"] is not blocks):
+        plan = None
+    record = SESSIONS.take(plan["scope"], plan["history"], acp) if plan and not plan.get("skip_reuse") else None
+    if record and any(m["role"] == "assistant" for m in plan["messages"][len(record.history):]):
+        SESSIONS.put(record)
+        record = None
+    req_dir, turn, sid, keep = "", Turn(), None, False
+    original_blocks, delivered = blocks, False
+    raw = []
     try:
+        if record:
+            sid = record.session["sessionId"]
+            start = len(record.history)
+            delta = plan["messages"][start:]
+            # The client assigns wire call IDs after the model's reply. Replay
+            # just that call declaration to bind new results to the right call.
+            if delta and delta[0]["role"] == "tool":
+                delta = plan["messages"][start - 1:]
+            _, blocks = to_acp("", delta, [], "none", fit=False)
+            sess = record.session
+        check_prompt_budget(system, blocks)
         if has_media:
             req_dir = os.path.join(media_home(acc.home), "w", secrets.token_hex(16))
             os.mkdir(req_dir, 0o700)
             blocks, allowed = await asyncio.to_thread(write_media, blocks, req_dir)
             turn = Turn(allowed, req_dir)
-        params: dict[str, Any] = {"cwd": req_dir or acp.cwd, "mcpServers": []}
-        if system:
-            params["_meta"] = {"antigravity": {"systemPrompt": {"append": system}}}
-        sess = await acp.request("session/new", params, 120)
-        acp.sessions += 1
-        sid = sess.get("sessionId")
+        if not record:
+            params: dict[str, Any] = {"cwd": req_dir or acp.cwd, "mcpServers": []}
+            if system:
+                params["_meta"] = {"antigravity": {"systemPrompt": {"append": system}}}
+            sess = await acp.request("session/new", params, min(120, max(1, deadline - time.time())))
+            acp.sessions += 1
+            sid = sess.get("sessionId")
         if not sid:
             raise AcpError("session/new returned no sessionId", "SERVER")
         acp.turns[sid] = turn
+        log.info("acp_session account=%s reused=%s text_bytes=%d", acc.name, bool(record),
+                 sum(len(b.get("text", "").encode()) for b in blocks))
         async for item in _run_session(acp, sess, turn, model, effort, blocks, deadline, has_media):
+            if item[0] == "text":
+                raw.append(item[1])
+            if item[0] in ("text", "thought") and item[1]:
+                delivered = True
             yield item
+        if plan and turn.cacheable and acp.alive:
+            answer = "".join(raw)
+            text, calls = parse_tool_calls(answer) if plan["tools"] else (answer, None)
+            parts = ([{"type": "text", "text": text}] if text else [])
+            parts += [dict(c, type="tool_call", id="") for c in (calls or [])]
+            history = plan["history"] + fingerprints([{"role": "assistant", "parts": parts}])
+            SESSIONS.put(SessionRecord(plan["scope"], acc.name, acp, acp.epoch, sess, history, time.monotonic()))
+            keep = True
+    except AcpError as exc:
+        # Only an explicit missing-session error proves no prompt was appended.
+        # Never replay an ambiguous timeout or a genuine quota failure here.
+        if record and not delivered and re.search(r"session.{0,40}(?:not found|does not exist|expired)|(?:unknown|invalid) session", str(exc), re.I):
+            log.info("acp_session account=%s stale session; rebuilding once", acc.name)
+            token = SESSION_PLAN.set(dict(plan, skip_reuse=True))
+            try:
+                async for item in run_on(acc, model, effort, system, original_blocks, deadline):
+                    yield item
+            finally:
+                SESSION_PLAN.reset(token)
+        else:
+            raise
     finally:
         if sid:
             acp.turns.pop(sid, None)
-            try:
-                await acp.request("session/close", {"sessionId": sid}, 15)
-            except Exception:  # noqa: BLE001
-                pass
+            if not keep:
+                # Cancellation or any uncertain partial result poisons a session.
+                # Shield cleanup from the HTTP stream's cancellation scope.
+                import anyio
+                with anyio.CancelScope(shield=True):
+                    try:
+                        await acp.notify("session/cancel", {"sessionId": sid})
+                        await acp.request("session/close", {"sessionId": sid}, 5)
+                    except Exception:
+                        pass
         if req_dir:
             shutil.rmtree(req_dir, ignore_errors=True)
             if sid:
                 forget_session(acc.home, sid)
+        await reap_sessions()
         await acp.maybe_recycle()
 
 
@@ -953,71 +1056,87 @@ async def _run_session(acp: AcpProcess, sess: dict, turn: Turn, model: str, effo
     if levels:
         POOL.model_levels[model] = levels
     if effort and lopt and lopt.get("currentValue") != effort and (not levels or effort in levels):
-        await acp.request("session/set_config_option", {"sessionId": sid, "configId": lopt.get("id", "thought_level"), "value": effort}, 60)
-    prompt = blocks
-    held: list[tuple[str, str]] = []   # hold the first ~400 chars so canned error replies can be recognised
-    held_len, released = 0, False
-    for i in range(MAX_CONTINUE + 1):
-        fut = asyncio.ensure_future(acp.request("session/prompt", {"sessionId": sid, "prompt": prompt}, max(5.0, deadline - time.time())))
-        while True:
-            getter = asyncio.ensure_future(turn.queue.get())
-            done, _ = await asyncio.wait({fut, getter}, timeout=max(0.1, deadline - time.time()), return_when=asyncio.FIRST_COMPLETED)
-            if getter in done:
-                item = getter.result()
-                if item[0] == "violation":
-                    await acp.notify("session/cancel", {"sessionId": sid})
-                    fut.cancel()
-                    raise violation_error(item[1])
-                if released or item[0] != "text":
-                    yield item
-                else:
-                    held.append(item)
-                    held_len += len(item[1])
-                    joined = "".join(t for _k, t in held)
-                    canned = could_be_canned(joined)
-                    err = soft_error(joined) if (held_len >= 400 or canned) else None
-                    if err:
+        res = await acp.request("session/set_config_option", {"sessionId": sid, "configId": lopt.get("id", "thought_level"), "value": effort}, 60)
+        opts = res.get("configOptions") or opts
+    sess["configOptions"] = opts
+    fut = getter = None
+    try:
+        prompt = blocks
+        held: list[tuple[str, str]] = []   # hold the first ~400 chars so canned error replies can be recognised
+        held_len, released = 0, False
+        for i in range(MAX_CONTINUE + 1):
+            fut = asyncio.ensure_future(acp.request("session/prompt", {"sessionId": sid, "prompt": prompt}, max(5.0, deadline - time.time())))
+            while True:
+                getter = asyncio.ensure_future(turn.queue.get())
+                done, _ = await asyncio.wait({fut, getter}, timeout=max(0.1, deadline - time.time()), return_when=asyncio.FIRST_COMPLETED)
+                if getter in done:
+                    item = getter.result()
+                    if item[0] == "violation":
                         await acp.notify("session/cancel", {"sessionId": sid})
                         fut.cancel()
-                        raise err
-                    if held_len >= 400 or not canned:
-                        for h in held:
-                            yield h
-                        held, released = [], True
-                continue
-            getter.cancel()
-            if fut in done:
-                while not turn.queue.empty():
-                    item = turn.queue.get_nowait()
-                    if item[0] == "violation":
                         raise violation_error(item[1])
                     if released or item[0] != "text":
                         yield item
                     else:
                         held.append(item)
-                break
-            if time.time() >= deadline:
-                await acp.notify("session/cancel", {"sessionId": sid})
-                fut.cancel()
-                raise AcpError("generation timed out (%.0fs)" % REQUEST_TIMEOUT, "TIMEOUT")
-        result = fut.result()
-        if held and not released:
-            err = soft_error("".join(t for _k, t in held) + "\n")
-            if err:
-                raise err
-            if result.get("stopReason") != "max_tokens":
-                for h in held:
-                    yield h
-                held, released = [], True
-        if isinstance(result.get("usage"), dict):
-            yield "usage", json.dumps(result["usage"])
-        stop = result.get("stopReason")
-        if stop == "max_tokens" and i < MAX_CONTINUE:
-            prompt = [{"type": "text", "text": "Continue exactly where you stopped. Do not repeat anything already written."}]
-            continue
-        if stop == "refusal":
-            raise AcpError("the model refused to answer", "BLOCKED")
-        break
+                        held_len += len(item[1])
+                        joined = "".join(t for _k, t in held)
+                        canned = could_be_canned(joined)
+                        err = soft_error(joined) if (held_len >= 400 or canned) else None
+                        if err:
+                            await acp.notify("session/cancel", {"sessionId": sid})
+                            fut.cancel()
+                            raise err
+                        if held_len >= 400 or not canned:
+                            for h in held:
+                                yield h
+                            held, released = [], True
+                    continue
+                getter.cancel()
+                if fut in done:
+                    while not turn.queue.empty():
+                        item = turn.queue.get_nowait()
+                        if item[0] == "violation":
+                            raise violation_error(item[1])
+                        if released or item[0] != "text":
+                            yield item
+                        else:
+                            held.append(item)
+                    break
+                if time.time() >= deadline:
+                    await acp.notify("session/cancel", {"sessionId": sid})
+                    fut.cancel()
+                    raise AcpError("generation timed out (%.0fs)" % REQUEST_TIMEOUT, "TIMEOUT")
+            result = fut.result()
+            if held and not released:
+                err = soft_error("".join(t for _k, t in held) + "\n")
+                if err:
+                    raise err
+                if result.get("stopReason") != "max_tokens":
+                    for h in held:
+                        yield h
+                    held, released = [], True
+            if isinstance(result.get("usage"), dict):
+                yield "usage", json.dumps(result["usage"])
+            stop = result.get("stopReason")
+            if stop == "max_tokens" and i < MAX_CONTINUE:
+                prompt = [{"type": "text", "text": "Continue exactly where you stopped. Do not repeat anything already written."}]
+                continue
+            if stop != "end_turn":
+                turn.cacheable = False
+            if stop == "refusal":
+                raise AcpError("the model refused to answer", "BLOCKED")
+            break
+
+    finally:
+        tasks = [task for task in (fut, getter) if task is not None]
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            import anyio
+            with anyio.CancelScope(shield=True):
+                await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def generate(model_name: str, system: str, blocks: list[dict], effort_override: str | None = None) -> AsyncIterator[tuple[str, str, str]]:
@@ -1047,7 +1166,7 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
         t0 = time.time()
         try:
             async for kind, text in run_on(acc, model, effort, system, blocks, deadline):
-                if kind == "text" and text:
+                if kind in ("text", "thought") and text:
                     emitted = True
                 elif kind == "usage":
                     try:
@@ -1531,7 +1650,7 @@ def _calls_block(calls: list[dict]) -> str:
             args = json.loads(c["arguments"]) if isinstance(c["arguments"], str) else c["arguments"]
         except ValueError:
             args = c["arguments"]
-        arr.append({"name": c["name"], "arguments": args})
+        arr.append({"id": c.get("id", ""), "name": c["name"], "arguments": args})
     return "<tool_calls>\n" + json.dumps(arr, ensure_ascii=False) + "\n</tool_calls>"
 
 
@@ -1539,10 +1658,10 @@ def _msg_chars(m: dict) -> int:
     n = 0
     for p in m["parts"]:
         if p["type"] in ("text", "tool_result"):
-            n += len(p.get("text") or "") + 40
+            n += len((p.get("text") or "").encode("utf-8")) + 40
         elif p["type"] == "tool_call":
             a = p.get("arguments")
-            n += len(a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)) + len(p.get("name") or "") + 40
+            n += len((a if isinstance(a, str) else json.dumps(a, ensure_ascii=False)).encode("utf-8")) + len(p.get("name") or "") + 40
     return n + 20
 
 
@@ -1573,10 +1692,13 @@ def _fit_history(history: list[dict], current: list[dict], system_chars: int) ->
     while drop < len(history) and total > budget:
         total -= sizes[drop]
         drop += 1
+    # Do not begin a retained transcript with a result whose call was removed.
+    while drop < len(history) and history[drop]["role"] == "tool":
+        drop += 1
     return history[drop:], drop
 
 
-def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_system: str = "", parallel: bool = True) -> tuple[str, list[dict]]:
+def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_system: str = "", parallel: bool = True, *, fit: bool = True) -> tuple[str, list[dict]]:
     """Internal conversation -> (system prompt, ACP prompt blocks). Earlier turns become a transcript (images stay
     in place as image blocks); the trailing user / tool messages are this turn's input."""
     if PI_PROMPT_COMPAT:
@@ -1596,14 +1718,17 @@ def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_
     while k > 0 and msgs[k - 1]["role"] != "assistant":
         k -= 1
     history, current = msgs[:k], msgs[k:]
-    history, left_out = _fit_history(history, current, sum(len(x) for x in sys_parts))
-    n_img = sum(1 for m in msgs for p in m["parts"] if p["type"] == "image")
+    if current and current[0]["role"] == "tool" and history and any(p["type"] == "tool_call" for p in history[-1]["parts"]):
+        current = [history[-1]] + current
+        history = history[:-1]
+    history, left_out = _fit_history(history, current, sum(len(x.encode("utf-8")) for x in sys_parts)) if fit else (history, 0)
+    n_img = sum(1 for m in history + current for p in m["parts"] if p["type"] == "image")
     n_now = sum(1 for m in current for p in m["parts"] if p["type"] == "image")
     if n_now > MAX_IMAGES:
         # never drop images the caller is asking about right now: say so instead (it used to drop the oldest ones silently)
         raise HTTPException(400, "too many images in the latest message: %d (this gateway takes at most %d images per "
                                  "request, AGY_MAX_IMAGES)" % (n_now, MAX_IMAGES))
-    skip = max(0, n_img - MAX_IMAGES)       # only earlier turns' images give way (they are rendered first), oldest first
+    skip = max(0, n_img - MAX_IMAGES) if fit else 0  # full-history fingerprints require lossless rendering
     blocks: list[dict] = []
 
     def text(t: str) -> None:
@@ -1633,7 +1758,8 @@ def to_acp(system: str, msgs: list[dict], tools: list[dict], choice: Any, extra_
         if role == "tool":
             for p in m["parts"]:
                 if p["type"] == "tool_result":
-                    text('\n\n<tool_result name="%s"%s>\n%s\n</tool_result>' % (p["name"], ' is_error="true"' if p["is_error"] else "", p["text"]))
+                    from html import escape
+                    text('\n\n<tool_result id="%s" name="%s"%s>\n%s\n</tool_result>' % (escape(p.get("id", ""), quote=True), escape(p["name"], quote=True), ' is_error="true"' if p["is_error"] else "", p["text"]))
                 elif p["type"] == "image":
                     image(p)
                 elif p["type"] == "media":
@@ -1920,6 +2046,7 @@ async def _bad_content(request: Request, e: BadContent) -> JSONResponse:
 
 
 def check_key(request: Request) -> None:
+    SESSION_PLAN.set(None)
     auth = request.headers.get("authorization", "")
     token = auth[7:] if auth[:7].lower() == "bearer " else (request.headers.get("x-api-key") or request.headers.get("api-key") or "")
     if not API_KEY or not secrets.compare_digest(token.encode(), API_KEY.encode()):
@@ -1969,6 +2096,27 @@ ERR_STATUS = {"QUOTA": 429, "RATE_LIMIT": 429, "UPSTREAM_LIMIT": 429, "NO_ACCOUN
               "BAD_REQUEST": 400, "AUTH": 503, "LICENSE": 503, "BUSY": 503}
 
 
+
+def prepare_prompt(request: Request, model: str, system: str, msgs: list[dict], tools: list[dict], choice: Any,
+                   extra_system: str = "", parallel: bool = True, effort: str | None = None) -> tuple[str, list[dict]]:
+    name = (request.headers.get("x-acp-session") or "").strip()
+    if name and not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", name):
+        raise HTTPException(400, "X-ACP-Session must be 1-128 ASCII letters, digits, dots, colons, underscores or hyphens")
+    reuse = SESSION_REUSE and name.lower() != "off" and not any(
+        p["type"] == "media" for m in msgs for p in m["parts"])
+    # Persistent sessions require a faithful full-history fingerprint. Never cache
+    # a session initialized with deleted history and pretend it has that history.
+    final_system, blocks = to_acp(system, msgs, tools, choice, extra_system, parallel, fit=not reuse)
+    if reuse:
+        messages = [m for m in msgs if m["parts"]]
+        scope = digest([API_KEY, name, model, effort, final_system, PIN.get(), request.url.path])
+        SESSION_PLAN.set({"scope": scope, "messages": messages, "history": fingerprints(messages),
+                          "system": final_system, "blocks": blocks, "tools": bool(tools) and choice != "none"})
+    else:
+        SESSION_PLAN.set(None)
+    return final_system, blocks
+
+
 def _wire_calls(calls: list[dict], prefix: str) -> list[dict]:
     return [{"id": prefix + uuid.uuid4().hex[:24], "name": c["name"], "arguments": c["arguments"]} for c in calls]
 
@@ -1994,7 +2142,7 @@ async def chat_completions(request: Request):
     system, msgs, tools, choice = from_openai(body)
     prepare_media(msgs, model_name)
     await fetch_remote_images(msgs)
-    system, blocks = to_acp(system, msgs, tools, choice, _json_instruction(body.get("response_format")), body.get("parallel_tool_calls") is not False)
+    system, blocks = prepare_prompt(request, model_name, system, msgs, tools, choice, _json_instruction(body.get("response_format")), body.get("parallel_tool_calls") is not False, body.get("reasoning_effort"))
     use_tools = bool(tools) and choice != "none"
     effort = body.get("reasoning_effort")
     cid = "chatcmpl-" + uuid.uuid4().hex[:24]
@@ -2087,7 +2235,7 @@ async def messages(request: Request):
     prepare_media(msgs, model_name)
     await fetch_remote_images(msgs)
     parallel = not (isinstance(body.get("tool_choice"), dict) and body["tool_choice"].get("disable_parallel_tool_use"))
-    system, blocks = to_acp(system, msgs, tools, choice, parallel=parallel)
+    system, blocks = prepare_prompt(request, model_name, system, msgs, tools, choice, parallel=parallel)
     use_tools = bool(tools) and choice != "none"
     mid = "msg_" + uuid.uuid4().hex[:24]
     prompt_est = est_prompt(system, blocks)
@@ -2181,7 +2329,7 @@ async def count_tokens(request: Request):
     msgs = [m for m in msgs if m["parts"]] or [{"role": "user", "parts": [{"type": "text", "text": " "}]}]
     for m in msgs:   # do not download anything just to count
         m["parts"] = [p if p["type"] != "image_url" else {"type": "text", "text": "[image]"} for p in m["parts"]]
-    system, blocks = to_acp(system, msgs, tools, choice)
+    system, blocks = to_acp(system, msgs, tools, choice, fit=False)
     return {"input_tokens": est_prompt(system, blocks)}
 
 
@@ -2205,7 +2353,7 @@ async def responses(request: Request):
     fmt = (body.get("text") or {}).get("format") or {}
     rf = {"type": "json_schema", "json_schema": {"schema": fmt.get("schema")}} if fmt.get("type") == "json_schema" else (
         {"type": "json_object"} if fmt.get("type") == "json_object" else None)
-    system, blocks = to_acp(system, msgs, tools, choice, _json_instruction(rf), body.get("parallel_tool_calls") is not False)
+    system, blocks = prepare_prompt(request, model_name, system, msgs, tools, choice, _json_instruction(rf), body.get("parallel_tool_calls") is not False, (body.get("reasoning") or {}).get("effort"))
     use_tools = bool(tools) and choice != "none"
     effort = (body.get("reasoning") or {}).get("effort")
     rid = "resp_" + uuid.uuid4().hex[:24]
@@ -2411,7 +2559,8 @@ async def status(request: Request, quota: int = 0):
         if quota:
             row["quota"] = await read_quota(a)
         out.append(row)
-    return {"version": __version__, "accounts": out, "per_account": POOL.limit, "waiting": POOL.waiting, "video_mode": VIDEO_MODE}
+    return {"version": __version__, "accounts": out, "per_account": POOL.limit, "waiting": POOL.waiting, "video_mode": VIDEO_MODE,
+            "session_cache": {"enabled": SESSION_REUSE, "entries": len(SESSIONS.entries), "hits": SESSIONS.hits, "misses": SESSIONS.misses}}
 
 
 @app.post("/admin/reset/{name}")
@@ -2426,6 +2575,12 @@ async def reset(name: str, request: Request):
     return {"ok": True}
 
 
+async def _session_sweeper() -> None:
+    while True:
+        await asyncio.sleep(30)
+        await reap_sessions()
+
+
 async def _janitor() -> None:
     """`agy` stores every session's conversation on disk. Every hour, delete files older than AGY_KEEP_HOURS so
     your users' prompts and images do not pile up on the server."""
@@ -2434,6 +2589,8 @@ async def _janitor() -> None:
             cutoff = time.time() - KEEP_HOURS * 3600
             removed = 0
             for a in list(POOL.accounts.values()):
+                active = {r.session["sessionId"] for r in SESSIONS.entries.values() if r.account == a.name}
+                active.update(a.acp.turns if a.acp else {})
                 base = os.path.join(a.home, ".gemini", "antigravity-cli")
                 for sub in ("conversations", "brain", "implicit", "annotations"):
                     d = os.path.join(base, sub)
@@ -2442,6 +2599,8 @@ async def _janitor() -> None:
                     for root, dirs, files in os.walk(d, topdown=False):
                         for fn in files:
                             fp = os.path.join(root, fn)
+                            if any(sid in fp for sid in active):
+                                continue
                             try:
                                 if os.path.getmtime(fp) < cutoff:
                                     os.remove(fp)
@@ -2478,6 +2637,7 @@ async def _startup() -> None:
     if KEEP_HOURS > 0:
         asyncio.create_task(_janitor())
     asyncio.create_task(_stats_saver())
+    asyncio.create_task(_session_sweeper())
     asyncio.create_task(_prewarm_all())
     event("info", "", "gateway started with %d account(s)" % len(POOL.accounts))
     log.info("ACP-Ant %s ready: %d account(s), agent %s", __version__, len(POOL.accounts), AGENT)

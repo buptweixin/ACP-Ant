@@ -1,0 +1,12 @@
+# Opt-in overlay: docker compose -f docker-compose.yml -f docker-compose.session.yml up -d --build
+services:
+  acp-ant:
+    image: acp-ant-fork:session-reuse
+    environment:
+      AGY_PI_PROMPT_COMPAT: "1"
+      AGY_SESSION_REUSE: "1"
+      AGY_MAX_PROMPT_BYTES: "180000"
+      AGY_SESSION_CACHE_SIZE: "64"
+      AGY_SESSION_TTL: "1800"
+      ACPANT_UPDATE_REPO: buptweixin/ACP-Ant
+      ACPANT_UPDATE_BRANCH: main
