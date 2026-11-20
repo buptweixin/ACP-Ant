@@ -1,0 +1,19 @@
+SESSION_REUSE.md
+  s_45e1a1981065f6::t_c2093cb9e59ac1 7-16,74-80
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "3a4a631fa48d7c2a3157e377de0bba9e04b8fccd",
+  "prompts": {},
+  "sessions": {
+    "s_45e1a1981065f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f01b-f431-79a2-912e-c5d4f09e29fa",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "buptweixin <weixin.bupt.ml@gmail.com>"
+    }
+  }
+}
