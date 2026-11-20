@@ -4,6 +4,16 @@
 
 ## 启用
 
+新安装可以直接使用本 fork 的可选 Compose 配置：
+
+```sh
+git clone https://github.com/buptweixin/ACP-Ant.git
+cd ACP-Ant
+docker compose -f docker-compose.yml -f docker-compose.session.yml up -d --build
+```
+
+已有部署应保留自己的数据卷、端口、反向代理和账号配置，只合并下面的环境变量并使用本 fork 重新构建镜像。
+
 Docker Compose 的网关 service 增加：
 
 ```yaml
@@ -61,3 +71,10 @@ python scripts/image_limit_test.py
 还需运行原有 content、model_route、quota_flow、soft_error、token_login、studio、studio_heal 和 video_mode 离线测试。真实联调应在单独数据目录与容器进行，不复用运行中的 agy 进程或会话数据库。
 
 检查 `/admin/status` 中 `session_cache.hits/misses/entries`，以及日志中的 `acp_session reused=True text_bytes=...`。日志不输出提示词正文。长文本验收要同时测试跨轮随机标记召回、工具循环、断开连接、缓存失效和分支；仅 HTTP 200 不算上下文保留成功。
+
+### 2026-11-20 验证记录
+
+- Python 3.12 / 3.14 的全部 12 组离线测试通过，包括 25 个会话/生命周期用例和 12 个 pi 提示词兼容用例。[CI 记录](https://github.com/buptweixin/ACP-Ant/actions/runs/44668621183)
+- 隔离环境的早期候选镜像完成两轮真实 `gemini-4-hydrogen` 请求，每轮发送 119,800 字节；第二轮复用了 session，只追加该轮输入，上游返回 36,665 input tokens，其中 cached tokens 为 18,529。
+- 第三轮长文本请求等待超时；随后的短请求也超时，未修改的原版服务短请求对照同样超时。基础 HTTPS 连通性正常，但没有据此认定具体上游故障原因。
+- 完整长文本随机标记召回尚未验收，因此不声称已经验证了百万 token 上下文或消除了所有 429。功能仍默认关闭，建议先在隔离环境运行真实探针。真实请求会消耗账号额度。
