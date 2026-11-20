@@ -1,0 +1,24 @@
+scripts/pi_prompt_compat_test.py
+  s_45e1a1981065f6::t_b6f43c2a095221 22-31,36-59,63,82
+pi_prompt_compat.py
+  s_45e1a1981065f6::t_b6f43c2a095221 16-18,58,60
+SESSION_REUSE.md
+  s_45e1a1981065f6::t_b6f43c2a095221 58
+  s_45e1a1981065f6::t_b7eb42b483dac0 81-86
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c0fa9f493437594cdcf02ed4aad6b5709372aa97",
+  "prompts": {},
+  "sessions": {
+    "s_45e1a1981065f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f01b-f431-79a2-912e-c5d4f09e29fa",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "buptweixin <weixin.bupt.ml@gmail.com>"
+    }
+  }
+}
