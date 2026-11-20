@@ -264,7 +264,7 @@ class StudioProvider:
     async def models(self):
         if not self.configured:
             return []
-        if time.monotonic() - self._models_at < 60:
+        if self._models_at and time.monotonic() - self._models_at < 60:
             return [dict(m) for m in self._models]
         try:
             client = await self._admin(10)

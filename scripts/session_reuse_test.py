@@ -197,6 +197,22 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.calls('session/cancel'))
         self.assertFalse(self.acp.turns)
 
+    async def test_nonstream_disconnect_cancels_generation_and_releases_slot(self):
+        async def disconnected():
+            return True
+        request = SimpleNamespace(headers={}, url=SimpleNamespace(path='/v1/chat/completions'),
+                                  is_disconnected=disconnected)
+        system, blocks = core.prepare_prompt(request, 'gemini-test', '', [msg('user', 'hello')], [], 'auto')
+        self.acp.block = asyncio.Event()
+        async def consume():
+            return [x async for x in core.generate_connected(request, 'gemini-test', system, blocks)]
+        task = asyncio.create_task(consume())
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        self.assertEqual(self.acc.inflight, 0)
+        self.assertEqual(len(core.SESSIONS.entries), 0)
+        self.assertTrue(self.calls('session/cancel'))
+
     async def test_same_session_not_leased_twice(self):
         history = await self.seed()
         self.acp.block = asyncio.Event()

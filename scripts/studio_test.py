@@ -136,7 +136,11 @@ async def unit():
     r = await p.forward('/v1/chat/completions', body)
     ok(r.status_code == 502 and b'wrong' not in r.body, 'upstream 401 becomes 502 without leaking the key')
     p.key = 'sidecar-key'
-    models = await p.models()
+    # A freshly booted CI runner can have a monotonic clock below 60 seconds.
+    # Timestamp zero means "never fetched", not a fresh empty catalog.
+    from unittest.mock import patch
+    with patch('studio_provider.time.monotonic', return_value=10):
+        models = await p.models()
     ok([m['id'] for m in models] == ['aistudio/gemini-4-hydrogen'] and models[0]['source'] == 'aistudio', 'only chat models are listed, with the aistudio/ prefix')
     rows, err = await p.accounts(force=True)
     text = json.dumps(rows)

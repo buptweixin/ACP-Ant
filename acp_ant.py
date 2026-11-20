@@ -1218,6 +1218,28 @@ async def generate(model_name: str, system: str, blocks: list[dict], effort_over
     raise last or AcpError("no usable Antigravity account for %s (all cooling down, logged out or disabled)" % model_name, "NO_ACCOUNT")
 
 
+async def generate_connected(request: Request, *args) -> AsyncIterator[tuple[str, str, str]]:
+    """Non-streaming clients can disconnect while agy is still generating."""
+    owner = asyncio.current_task()
+
+    async def watch_disconnect():
+        while True:
+            await asyncio.sleep(0.5)
+            if await request.is_disconnected():
+                owner.cancel()
+                return
+
+    watcher = asyncio.create_task(watch_disconnect())
+    try:
+        async for item in generate(*args):
+            yield item
+    finally:
+        watcher.cancel()
+        import anyio
+        with anyio.CancelScope(shield=True):
+            await asyncio.gather(watcher, return_exceptions=True)
+
+
 # ======================================================================================================
 # Requests: OpenAI / Anthropic -> one internal conversation -> ACP prompt
 #   internal message: {"role": "user" | "assistant" | "tool", "parts": [...]}
@@ -2197,7 +2219,7 @@ async def chat_completions(request: Request):
 
     u, parts, acc_name = Usage(), [], ""
     try:
-        async for kind, text, acc_name in generate(model_name, system, blocks, effort):
+        async for kind, text, acc_name in generate_connected(request, model_name, system, blocks, effort):
             if kind == "text":
                 parts.append(text)
             elif kind == "usage":
@@ -2303,7 +2325,7 @@ async def messages(request: Request):
 
     u, parts = Usage(), []
     try:
-        async for kind, text, _acc in generate(model_name, system, blocks):
+        async for kind, text, _acc in generate_connected(request, model_name, system, blocks):
             if kind == "text":
                 parts.append(text)
             elif kind == "usage":
@@ -2453,7 +2475,7 @@ async def responses(request: Request):
 
     u, parts = Usage(), []
     try:
-        async for kind, text, _acc in generate(model_name, system, blocks, effort):
+        async for kind, text, _acc in generate_connected(request, model_name, system, blocks, effort):
             if kind == "text":
                 parts.append(text)
             elif kind == "usage":
