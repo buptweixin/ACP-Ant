@@ -1,0 +1,25 @@
+acp_ant.py
+  s_45e1a1981065f6::t_621ca7c25aa25e 1221-1242,2222,2328,2478
+scripts/session_reuse_test.py
+  s_45e1a1981065f6::t_8cfc97649d444b 200-215
+scripts/studio_test.py
+  s_45e1a1981065f6::t_4761c29c205d7b 139-143
+studio_provider.py
+  s_45e1a1981065f6::t_4761c29c205d7b 267
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "4a7c9146149cbf382ab562d7ec3f2c87df6ed4f6",
+  "prompts": {},
+  "sessions": {
+    "s_45e1a1981065f6": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "01a0f01b-f431-79a2-912e-c5d4f09e29fa",
+        "model": "gpt-6-astra"
+      },
+      "human_author": "buptweixin <weixin.bupt.ml@gmail.com>"
+    }
+  }
+}
