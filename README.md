@@ -103,6 +103,24 @@ cat data/panel-initial-password.txt     # 面板初始密码（可能要 sudo）
 - 默认只监听本机 `127.0.0.1:8095`，要绑定域名请在前面加 Caddy / Nginx（见下文）；端口和其它设置在 `docker-compose.yml` 里改。
 - 命令行管账号：`docker compose exec acp-ant account.sh list`（一般用面板就够了）。
 
+#### 在 GitHub Actions 手动发布 Docker 镜像
+
+仓库提供 **Publish Docker image** workflow，手动构建并推送到 **Docker Hub**，同一个镜像标签支持 `linux/amd64` 和 `linux/arm64`（ARM64 / aarch64）。
+
+1. 在 Docker Hub 创建镜像仓库和具有写入权限的 Access Token。
+2. 在 GitHub 仓库 **Settings → Secrets and variables → Actions → New repository secret** 添加：
+   - `DOCKERHUB_USERNAME`：Docker Hub 用户名。
+   - `DOCKERHUB_TOKEN`：上面的 Access Token。
+3. 将 workflow 提交到仓库默认分支后，打开 **Actions → Publish Docker image → Run workflow**，选择要构建的分支并填写：
+
+   | 参数 | 示例 | 说明 |
+   |---|---|---|
+   | `image_name` | `yourname/acp-ant` | Docker Hub 完整镜像名，使用小写；账号须有该仓库的写入权限 |
+   | `version` | `1.5.0` | 发布为 `yourname/acp-ant:1.5.0`，也支持 `v1.5.0` 等合法 Docker 标签 |
+   | `latest` | 勾选（默认） | 同时发布 `yourname/acp-ant:latest`；取消勾选则只发布版本标签 |
+
+发布成功后可以运行 `docker pull yourname/acp-ant:1.5.0`，Docker 会自动选择当前机器对应的架构。此流程仅在手动点击 **Run workflow** 时发布。
+
 ### 更新
 
 - 网页控制面板每 6 小时读一次 GitHub 上的 [CHANGELOG.md](CHANGELOG.md)（只读取这一个公开文件，不上传任何数据），有新版本时在顶部提示并列出更新内容。可以在「设置」里关闭，或在 `gateway.env` 里写 `ACPANT_UPDATE_CHECK_HOURS=0` 彻底关掉。
@@ -404,6 +422,21 @@ Anthropic 格式下，「没有可用账号」返回 529（overloaded），Claud
 - 本项目不绕过 Google 的任何限制（比如上面说的 Claude Code）。
 - Antigravity CLI 和 ACP 协议都还在变化，新版本可能改变行为。本项目在 `agy` 1.5.2 上测试通过。
 
+## 贡献者
+
+感谢每一位提交代码、报告问题和提出建议的朋友（按第一次参与的时间排列）：
+
+| 贡献者 | 贡献 |
+|---|---|
+| [@susu123oss](https://github.com/susu123oss) | [#1](https://github.com/czg86389-hub/ACP-Ant/issues/1) 反馈响应速度；[PR #10](https://github.com/czg86389-hub/ACP-Ant/pull/10) 研究上游 429 的分类 |
+| [@ashanzzz](https://github.com/ashanzzz) | 报告并给出修复思路（[PR #2](https://github.com/czg86389-hub/ACP-Ant/pull/2)）：[#3](https://github.com/czg86389-hub/ACP-Ant/issues/3) 工具参数含换行时解析失败、[#4](https://github.com/czg86389-hub/ACP-Ant/issues/4) 长对话最新输入被截断、[#6](https://github.com/czg86389-hub/ACP-Ant/issues/6) 网络抖动时的假回复（均已修复）；[#5](https://github.com/czg86389-hub/ACP-Ant/issues/5) 思考流输出建议 |
+| [@Danborad](https://github.com/Danborad) | [#7](https://github.com/czg86389-hub/ACP-Ant/issues/7) 模型列表缺 Gemini 4 Hydrogen、面板显示问题（1.5.1 修复） |
+| [@wangbingnan136](https://github.com/wangbingnan136)（提交账号 [@wangbingnan728628-netizen](https://github.com/wangbingnan728628-netizen)） | [PR #8](https://github.com/czg86389-hub/ACP-Ant/pull/8) 按账号路由模型，支持 Gemini 4 Hydrogen 和 `xhigh` 思考档位（1.5.1 合入） |
+| [@XingXiaoWu](https://github.com/XingXiaoWu) | [PR #9](https://github.com/czg86389-hub/ACP-Ant/pull/9) GitHub Actions 发布 amd64 / arm64 Docker 镜像 |
+| [@buptweixin](https://github.com/buptweixin) | [PR #11](https://github.com/czg86389-hub/ACP-Ant/pull/11) 发现并完整复现 pi 1.5.2 默认提示词在 Antigravity 上收到 429 |
+
+欢迎提交 issue 和 PR，参与过的朋友都会加进这张表。
+
 ## 致谢
 
 用 ACP 协议驱动 `agy acp` 的思路来自 [lili-luo/dsh-plugin-bundle](https://github.com/lili-luo/dsh-plugin-bundle) 里的 `dsh-llm-antigravity-acp`（MIT）。本项目是独立实现，并增加了三种标准接口、工具调用、多账号、每账号代理、自动换号、软错误识别、额度查询和会话清理。
@@ -482,5 +515,7 @@ Upload one product photo and get talking-head sales videos, story-style ad short
 
 
 **Disclaimer:** this is an unofficial tool, not affiliated with Google. Follow the Antigravity terms of service. Sharing a personal subscription with many users or with a commercial service may break those terms and get accounts restricted. Use at your own risk. Tested with `agy` 1.5.2.
+
+**Contributors** (thank you!): [@susu123oss](https://github.com/susu123oss) (speed report #1, 429 classification research in PR #10) · [@ashanzzz](https://github.com/ashanzzz) (bug reports #3, #4, #6 with fix ideas in PR #2; feature request #5) · [@Danborad](https://github.com/Danborad) (#7: missing Hydrogen, panel display) · [@wangbingnan136](https://github.com/wangbingnan136) / [@wangbingnan728628-netizen](https://github.com/wangbingnan728628-netizen) (per-account model routing, PR #8) · [@XingXiaoWu](https://github.com/XingXiaoWu) (Docker image workflow, PR #9) · [@buptweixin](https://github.com/buptweixin) (reproduced pi 1.5.2 prompts getting 429, PR #11). Issues and pull requests are welcome; everyone who takes part is added here.
 
 Inspired by `dsh-llm-antigravity-acp` in [lili-luo/dsh-plugin-bundle](https://github.com/lili-luo/dsh-plugin-bundle) (MIT). Licensed under [MIT](LICENSE).
